@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import Peer from "peerjs";
 
 const g = (x,m,s,a) => a*Math.exp(-0.5*((x-m)/s)**2);
 const normalQRST=t=>g(t,.13,.03,.11)+g(t,.225,.007,-.1)+g(t,.248,.013,1.1)+g(t,.272,.007,-.22)+g(t,.43,.055,.21);
@@ -91,10 +90,23 @@ function useAlarmSound(enabled,level){
   },[enabled,level]);
   const unlock=()=>{
     if(!ctxRef.current){
-      try{ctxRef.current=new(window.AudioContext||window.webkitAudioContext)();}catch(e){}
-    }else if(ctxRef.current.state==="suspended"){
-      ctxRef.current.resume().catch(()=>{});
+      try{ctxRef.current=new(window.AudioContext||window.webkitAudioContext)();}catch(e){return;}
     }
+    const ctx=ctxRef.current;
+    const beep=()=>{
+      const t=ctx.currentTime+.03;
+      const osc=ctx.createOscillator(),gain=ctx.createGain();
+      osc.type="square";osc.frequency.value=880;
+      gain.gain.setValueAtTime(0,t);
+      gain.gain.linearRampToValueAtTime(.25,t+.01);
+      gain.gain.linearRampToValueAtTime(0,t+.16);
+      osc.connect(gain);gain.connect(ctx.destination);
+      osc.start(t);osc.stop(t+.17);
+    };
+    // iOS/Safari often creates contexts in a "suspended" state even from a tap — resume explicitly,
+    // then play a short confirmation beep so the user immediately knows sound is working.
+    if(ctx.state!=="running")ctx.resume().then(beep).catch(()=>{});
+    else beep();
   };
   return unlock;
 }
@@ -249,7 +261,7 @@ function ValCol({label,color,big,hi,lo,unit,sub,size=42}){
 }
 
 function Monitor({state,disp,trans,dampTrans,hrHist,rrHist,beatHrRef,beatRrRef,onChange,toggle,open}){
-  const{rhythm,cpr,damping}=state;
+  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult}=state;
   const d=disp.current;
   const hrN=Math.round(beatHrRef.current),spo2N=Math.round(d.spo2),rrN=Math.round(beatRrRef.current),etN=Math.round(d.etco2);
   const absN=Math.round(d.abp.sys),abdN=Math.round(d.abp.dia);
@@ -260,17 +272,6 @@ function Monitor({state,disp,trans,dampTrans,hrHist,rrHist,beatHrRef,beatRrRef,o
   const[blink,setBlink]=useState(true);
   useEffect(()=>{const iv=setInterval(()=>setBlink(b=>!b),650);return()=>clearInterval(iv);},[]);
 
-  // Local, device-side controls — things the student/rescuer does on this monitor itself
-  // (not remote-controlled by the operator phone): NIBP cuff cycle, capnography hookup, bagging.
-  const[nibpR,setNibpR]=useState({sys:null,dia:null,measuring:false});
-  const nibpTimer=useRef(null);
-  const startNibp=()=>{
-    setNibpR(p=>({...p,measuring:true}));
-    if(nibpTimer.current)clearTimeout(nibpTimer.current);
-    nibpTimer.current=setTimeout(()=>setNibpR({sys:state.nibp.sys,dia:state.nibp.dia,measuring:false}),4000);
-  };
-  const[etco2On,setEtco2On]=useState(false);
-  const[bagging,setBagging]=useState(false);
   const etDisplay=!etco2On?"---":(cpr?Math.max(etN,10):etN);
   const rrDisplay=bagging?10:(alive?rrN:"---");
 
@@ -331,18 +332,13 @@ function Monitor({state,disp,trans,dampTrans,hrHist,rrHist,beatHrRef,beatRrRef,o
         ))}
       </div>
 
-      <div style={{display:"flex",borderTop:"1px solid #1c1c1c",background:"#0a0a0a",padding:"10px 16px",flexShrink:0,alignItems:"center",gap:14}}>
-        <div style={{display:"flex",alignItems:"baseline",gap:10}}>
-          <span style={{color:C.abp,fontSize:16,fontWeight:"bold"}}>NIBP</span>
-          <span style={{color:C.abp,fontSize:44,fontWeight:900,lineHeight:1}}>
-            {nibpR.measuring?"측정중...":nibpR.sys?`${nibpR.sys}/${nibpR.dia}`:"--/--"}
-          </span>
-          {nibpR.sys&&!nibpR.measuring&&<span style={{color:C.abp,fontSize:20,fontWeight:"bold"}}>({Math.round((nibpR.sys+2*nibpR.dia)/3)})</span>}
-          <span style={{color:"#666",fontSize:13}}>mmHg</span>
-        </div>
-        <button onClick={startNibp} disabled={nibpR.measuring} style={{marginLeft:"auto",padding:"9px 16px",background:nibpR.measuring?"#111":"#0c2a2a",border:`2px solid ${nibpR.measuring?"#222":"#2a6a6a"}`,color:nibpR.measuring?"#444":"#4de0e0",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:nibpR.measuring?"not-allowed":"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>🩺 NIBP 측정</button>
-        <button onClick={()=>setEtco2On(v=>!v)} style={{padding:"9px 16px",background:etco2On?"#2a2200":"#111",border:`2px solid ${etco2On?"#bfa02f":"#222"}`,color:etco2On?"#ffe14d":"#666",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>🌬️ EtCO₂ {etco2On?"연결됨":"연결"}</button>
-        <button onClick={()=>setBagging(v=>!v)} style={{padding:"9px 16px",background:bagging?"#0c2a0c":"#111",border:`2px solid ${bagging?"#2fbf2f":"#222"}`,color:bagging?"#4dff4d":"#666",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>🫁 Ambu Bagging {bagging?"중":""}</button>
+      <div style={{display:"flex",borderTop:"1px solid #1c1c1c",background:"#0a0a0a",padding:"10px 16px",flexShrink:0,alignItems:"center",gap:10}}>
+        <span style={{color:C.abp,fontSize:16,fontWeight:"bold"}}>NIBP</span>
+        <span style={{color:C.abp,fontSize:44,fontWeight:900,lineHeight:1}}>
+          {nibpMeasuring?"측정중...":nibpResult?`${nibpResult.sys}/${nibpResult.dia}`:"--/--"}
+        </span>
+        {nibpResult&&!nibpMeasuring&&<span style={{color:C.abp,fontSize:20,fontWeight:"bold"}}>({Math.round((nibpResult.sys+2*nibpResult.dia)/3)})</span>}
+        <span style={{color:"#666",fontSize:13}}>mmHg</span>
       </div>
 
     </div>
@@ -432,13 +428,22 @@ const PR=[
 ];
 
 function Panel({state,onChange,open,toggle,fullScreen}){
-  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,damping,temp}=state;
+  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,damping,temp,etco2On,bagging,nibpMeasuring}=state;
   const[draft,setDraft]=useState({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});
   useEffect(()=>{setDraft({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});},[hr,spo2,rr,etco2,temp,nibp.sys,nibp.dia,abp.sys,abp.dia]);
   const dirty=draft.hr!==hr||draft.spo2!==spo2||draft.rr!==rr||draft.etco2!==etco2||draft.temp!==temp||draft.nibp.sys!==nibp.sys||draft.nibp.dia!==nibp.dia||draft.abp.sys!==abp.sys||draft.abp.dia!==abp.dia;
   const apply=()=>{
     onChange("hr",draft.hr);onChange("spo2",draft.spo2);onChange("rr",draft.rr);onChange("etco2",draft.etco2);onChange("temp",draft.temp);
     onChange("nibp",draft.nibp);onChange("abp",draft.abp);
+  };
+  const nibpTimer=useRef(null);
+  const startNibp=()=>{
+    onChange("nibpMeasuring",true);
+    if(nibpTimer.current)clearTimeout(nibpTimer.current);
+    nibpTimer.current=setTimeout(()=>{
+      onChange("nibpResult",{sys:draft.nibp.sys,dia:draft.nibp.dia});
+      onChange("nibpMeasuring",false);
+    },4000);
   };
   const sl=(l,k,v,mn,mx,st=1,col="#ccc")=>(
     <div style={{marginBottom:8}}>
@@ -450,6 +455,12 @@ function Panel({state,onChange,open,toggle,fullScreen}){
     <div style={fullScreen
       ?{width:"100%",height:"100%",background:"#0b0b0b",overflowY:"auto",padding:"14px",fontFamily:"monospace",boxSizing:"border-box"}
       :{position:"fixed",right:0,top:0,bottom:0,width:290,background:"#0b0b0b",borderLeft:"2px solid #1a1a1a",overflowY:"auto",zIndex:999,padding:"12px",fontFamily:"monospace"}}>
+      <div style={{marginBottom:14,display:"flex",flexDirection:"column",gap:6}}>
+        <div style={{color:"#444",fontSize:10}}>장비 연결 / 처치</div>
+        <button onClick={startNibp} disabled={nibpMeasuring} style={{padding:"10px 8px",background:nibpMeasuring?"#111":"#0c2a2a",border:`2px solid ${nibpMeasuring?"#222":"#2a6a6a"}`,color:nibpMeasuring?"#444":"#4de0e0",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:nibpMeasuring?"not-allowed":"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>{nibpMeasuring?"측정 중...":"🩺 NIBP 측정"}</button>
+        <button onClick={()=>onChange("etco2On",!etco2On)} style={{padding:"10px 8px",background:etco2On?"#2a2200":"#111",border:`2px solid ${etco2On?"#bfa02f":"#222"}`,color:etco2On?"#ffe14d":"#666",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>🌬️ EtCO₂ {etco2On?"연결됨 (해제)":"연결"}</button>
+        <button onClick={()=>onChange("bagging",!bagging)} style={{padding:"10px 8px",background:bagging?"#0c2a0c":"#111",border:`2px solid ${bagging?"#2fbf2f":"#222"}`,color:bagging?"#4dff4d":"#666",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>🫁 Ambu Bagging {bagging?"중 (정지)":""}</button>
+      </div>
           <div style={{color:"#aaa",fontSize:14,fontWeight:"bold",marginBottom:12,borderBottom:"1px solid #1a1a1a",paddingBottom:8}}>⚙ OPERATOR</div>
           <div style={{marginBottom:12}}>
             <div style={{color:"#444",fontSize:10,marginBottom:6}}>DISPLAY 전환</div>
@@ -509,8 +520,8 @@ function Panel({state,onChange,open,toggle,fullScreen}){
   );
 }
 
-const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:118,dia:76},etco2:35,temp:37.0,cpr:false,damping:"normal",dc:{energy:200,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",pacer:{on:false,rate:60,output:50}}};
-const PEER_PREFIX="acls-mon-"; // PeerJS ids must be alphanumeric-ish; prefix avoids collisions with other apps on the public broker
+const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:118,dia:76},etco2:35,temp:37.0,cpr:false,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:200,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",pacer:{on:false,rate:60,output:50}}};
+const KEY=code=>`acls_sim_${code}`;
 
 function SimDisplay({state,set,charge,shock}){
   const[open,setOpen]=useState(false);
@@ -559,36 +570,41 @@ function RoleSelect({onPick}){
   );
 }
 
-// ---- device-to-device sync via PeerJS (WebRTC) ----
-// Uses PeerJS's free public signalling server only to set up the connection; once connected,
-// data flows directly phone <-> iPad over WebRTC (works across wifi/cellular, no backend to run).
 function MonitorHost(){
   const[code]=useState(()=>String(Math.floor(1000+Math.random()*9000)));
   const[state,setState]=useState(INIT);
-  const[status,setStatus]=useState({connected:false,lastRecv:0,err:""});
+  const[status,setStatus]=useState({ok:false,lastRecv:0,err:""});
   const ct=useRef(null);
-  const peerRef=useRef(null);
   const charge=()=>{setState(p=>({...p,dc:{...p.dc,charging:true,charged:false}}));if(ct.current)clearTimeout(ct.current);ct.current=setTimeout(()=>setState(p=>({...p,dc:{...p.dc,charging:false,charged:true}})),2800);};
   const shock=()=>{setState(p=>({...p,dc:{...p.dc,charged:false,shockDelivered:true,shockCount:p.dc.shockCount+1}}));setTimeout(()=>setState(p=>({...p,dc:{...p.dc,shockDelivered:false}})),3500);};
   const setDc=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]); // e.g. pacer knob changes on the DC screen itself
-
+  const lastTs=useRef(0);
   useEffect(()=>{
-    const peer=new Peer(PEER_PREFIX+code);
-    peerRef.current=peer;
-    peer.on("open",()=>setStatus(s=>({...s,err:""})));
-    peer.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err)})));
-    peer.on("connection",conn=>{
-      conn.on("data",data=>{
-        // keep this device's own defibrillator state (charge/shock/pacer) local —
-        // the operator phone only drives the patient's rhythm/vitals, not the defib controls.
-        setState(p=>({...data,dc:p.dc}));
-        setStatus(s=>({...s,connected:true,lastRecv:Date.now()}));
-      });
-      conn.on("close",()=>setStatus(s=>({...s,connected:false})));
-    });
-    return()=>peer.destroy();
+    let stop=false;
+    const poll=async()=>{
+      try{
+        if(!window.storage)throw new Error("이 화면이 Claude 아티팩트로 열려있지 않아 저장소를 쓸 수 없어요");
+        const res=await window.storage.get(KEY(code),false);
+        if(res&&!stop){
+          const parsed=JSON.parse(res.value);
+          if(parsed._ts!==lastTs.current){
+            lastTs.current=parsed._ts;
+            // keep this device's own defibrillator state (charge/shock/pacer) local —
+            // the operator phone only drives the patient's rhythm/vitals, not the defib controls.
+            setState(p=>({...parsed,dc:p.dc}));
+          }
+          setStatus({ok:true,lastRecv:Date.now(),err:""});
+        }
+      }catch(e){
+        // "not found" is expected until an operator connects — only surface real errors
+        const msg=String(e&&e.message||e);
+        setStatus(s=>({...s,err:/not found|no such|404/i.test(msg)?"":msg}));
+      }
+      if(!stop)setTimeout(poll,400);
+    };
+    poll();
+    return()=>{stop=true;};
   },[code]);
-
   const[,force]=useState(0);
   useEffect(()=>{const iv=setInterval(()=>force(x=>x+1),1000);return()=>clearInterval(iv);},[]);
   const secsAgo=status.lastRecv?Math.round((Date.now()-status.lastRecv)/1000):null;
@@ -607,46 +623,28 @@ function OperatorHost(){
   const[code,setCode]=useState("");
   const[joined,setJoined]=useState(false);
   const[state,setState]=useState(INIT);
-  const[status,setStatus]=useState({lastSent:0,err:"",connecting:false});
+  const[status,setStatus]=useState({lastSent:0,err:""});
   const set=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
-  const peerRef=useRef(null);
-  const connRef=useRef(null);
-
-  const connect=()=>{
-    if(code.length!==4)return;
-    setStatus({lastSent:0,err:"",connecting:true});
-    const peer=new Peer();
-    peerRef.current=peer;
-    peer.on("open",()=>{
-      const conn=peer.connect(PEER_PREFIX+code,{reliable:true});
-      connRef.current=conn;
-      conn.on("open",()=>{setJoined(true);setStatus(s=>({...s,connecting:false}));});
-      conn.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err),connecting:false})));
-    });
-    peer.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err),connecting:false})));
-  };
-
   useEffect(()=>{
-    if(!joined||!connRef.current)return;
-    try{
-      connRef.current.send({...state,_ts:Date.now()});
-      setStatus(s=>({...s,lastSent:Date.now(),err:""}));
-    }catch(e){setStatus(s=>({...s,err:String(e&&e.message||e)}));}
-  },[state,joined]);
-
-  useEffect(()=>()=>{if(peerRef.current)peerRef.current.destroy();},[]);
-
+    if(!joined)return;
+    (async()=>{
+      try{
+        if(!window.storage)throw new Error("이 화면이 Claude 아티팩트로 열려있지 않아 저장소를 쓸 수 없어요");
+        const payload=JSON.stringify({...state,_ts:Date.now()});
+        await window.storage.set(KEY(code),payload,false);
+        setStatus({lastSent:Date.now(),err:""});
+      }catch(e){setStatus(s=>({...s,err:String(e&&e.message||e)}));}
+    })();
+  },[state,joined,code]);
   const[,force]=useState(0);
   useEffect(()=>{const iv=setInterval(()=>force(x=>x+1),1000);return()=>clearInterval(iv);},[]);
   const secsAgo=status.lastSent?Math.round((Date.now()-status.lastSent)/1000):null;
-
   if(!joined){
     return(
       <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,padding:24,fontFamily:"monospace"}}>
         <div style={{color:"#4dcc4d",fontSize:14,fontWeight:"bold"}}>📱 Operator — Monitor 기기의 코드를 입력하세요</div>
         <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="1234" inputMode="numeric" style={{fontSize:32,letterSpacing:8,textAlign:"center",width:180,padding:"10px 0",background:"#111",border:"2px solid #333",color:"#4dcc4d",borderRadius:8,fontFamily:"monospace"}}/>
-        <button onClick={connect} disabled={code.length!==4||status.connecting} style={{padding:"12px 28px",background:code.length===4?"#0c2a0c":"#111",border:`2px solid ${code.length===4?"#2fbf2f":"#222"}`,color:code.length===4?"#4dff4d":"#444",borderRadius:8,fontSize:14,fontWeight:"bold",cursor:code.length===4?"pointer":"not-allowed",fontFamily:"monospace"}}>{status.connecting?"연결 중...":"연결"}</button>
-        {status.err&&<div style={{color:"#FF5555",fontSize:12}}>⚠ {status.err}</div>}
+        <button onClick={()=>code.length===4&&setJoined(true)} disabled={code.length!==4} style={{padding:"12px 28px",background:code.length===4?"#0c2a0c":"#111",border:`2px solid ${code.length===4?"#2fbf2f":"#222"}`,color:code.length===4?"#4dff4d":"#444",borderRadius:8,fontSize:14,fontWeight:"bold",cursor:code.length===4?"pointer":"not-allowed",fontFamily:"monospace"}}>연결</button>
       </div>
     );
   }
