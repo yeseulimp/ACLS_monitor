@@ -59,6 +59,18 @@ const abpShape=(t,damp)=>keyInterp(t,ABP_PTS[damp]||ABP_PTS.normal);
 
 // ---- alarm sound (Web Audio, no audio files needed) ----
 // level: 'none' | 'med' | 'high'. Audio must be unlocked by a user tap first (browser autoplay rule).
+// Tones are clean sine waves in short multi-pulse bursts (closer to the IEC 60601-1-8 hospital
+// alarm melodies GE/Philips monitors use) rather than a single harsh square-wave "game" beep.
+function playTone(ctx,t,freq,dur,vol){
+  const osc=ctx.createOscillator(),gain=ctx.createGain();
+  osc.type="sine";osc.frequency.value=freq;
+  gain.gain.setValueAtTime(0,t);
+  gain.gain.linearRampToValueAtTime(vol,t+.012);
+  gain.gain.linearRampToValueAtTime(vol*.6,t+dur*.5);
+  gain.gain.linearRampToValueAtTime(0,t+dur);
+  osc.connect(gain);gain.connect(ctx.destination);
+  osc.start(t);osc.stop(t+dur+.02);
+}
 function useAlarmSound(enabled,level){
   const ctxRef=useRef(null);
   const nextRef=useRef(0);
@@ -69,18 +81,16 @@ function useAlarmSound(enabled,level){
       if(enabled&&ctx&&level!=="none"){
         const now=ctx.currentTime;
         if(now>=nextRef.current){
-          const pat=level==="high"?{beeps:5,gap:.1,freq:1000,period:1.3}:{beeps:2,gap:.14,freq:780,period:2.4};
-          for(let i=0;i<pat.beeps;i++){
-            const t=now+i*pat.gap;
-            const osc=ctx.createOscillator(),gain=ctx.createGain();
-            osc.type="square";osc.frequency.value=pat.freq;
-            gain.gain.setValueAtTime(0,t);
-            gain.gain.linearRampToValueAtTime(.12,t+.006);
-            gain.gain.linearRampToValueAtTime(0,t+.065);
-            osc.connect(gain);gain.connect(ctx.destination);
-            osc.start(t);osc.stop(t+.07);
+          if(level==="high"){
+            // crisis alarm: alternating two-tone urgent burst (10 pulses), like a real bedside monitor
+            const freqs=[880,659,880,659,880,659,880,659,880,659];
+            freqs.forEach((f,i)=>playTone(ctx,now+i*.11,f,.085,.2));
+            nextRef.current=now+2.0;
+          }else{
+            // warning alarm: gentler 3-pulse single-tone burst
+            [0,1,2].forEach(i=>playTone(ctx,now+i*.17,659,.12,.15));
+            nextRef.current=now+3.2;
           }
-          nextRef.current=now+pat.period;
         }
       }
       raf=requestAnimationFrame(tick);
@@ -93,18 +103,9 @@ function useAlarmSound(enabled,level){
       try{ctxRef.current=new(window.AudioContext||window.webkitAudioContext)();}catch(e){return;}
     }
     const ctx=ctxRef.current;
-    const beep=()=>{
-      const t=ctx.currentTime+.03;
-      const osc=ctx.createOscillator(),gain=ctx.createGain();
-      osc.type="square";osc.frequency.value=880;
-      gain.gain.setValueAtTime(0,t);
-      gain.gain.linearRampToValueAtTime(.25,t+.01);
-      gain.gain.linearRampToValueAtTime(0,t+.16);
-      osc.connect(gain);gain.connect(ctx.destination);
-      osc.start(t);osc.stop(t+.17);
-    };
+    const beep=()=>playTone(ctx,ctx.currentTime+.03,659,.15,.22);
     // iOS/Safari often creates contexts in a "suspended" state even from a tap — resume explicitly,
-    // then play a short confirmation beep so the user immediately knows sound is working.
+    // then play a short confirmation tone so the user immediately knows sound is working.
     if(ctx.state!=="running")ctx.resume().then(beep).catch(()=>{});
     else beep();
   };
