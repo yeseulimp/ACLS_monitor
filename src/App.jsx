@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import Peer from "peerjs";
 
 const g = (x,m,s,a) => a*Math.exp(-0.5*((x-m)/s)**2);
 const normalQRST=t=>g(t,.13,.03,.11)+g(t,.225,.007,-.1)+g(t,.248,.013,1.1)+g(t,.272,.007,-.22)+g(t,.43,.055,.21);
@@ -822,7 +823,7 @@ function Panel({state,onChange,open,toggle,fullScreen}){
 }
 
 const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:118,dia:76},etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
-const KEY=code=>`acls_sim_${code}`;
+const PEER_PREFIX="acls-mon-"; // PeerJS ids must be alphanumeric-ish; prefix avoids collisions with other apps on the public broker
 
 function SimDisplay({state,set,charge,shock}){
   const[open,setOpen]=useState(false);
@@ -874,38 +875,30 @@ function RoleSelect({onPick}){
 function MonitorHost(){
   const[code]=useState(()=>String(Math.floor(1000+Math.random()*9000)));
   const[state,setState]=useState(INIT);
-  const[status,setStatus]=useState({ok:false,lastRecv:0,err:""});
+  const[status,setStatus]=useState({connected:false,lastRecv:0,err:""});
   const ct=useRef(null);
+  const peerRef=useRef(null);
   const charge=()=>{setState(p=>({...p,dc:{...p.dc,charging:true,charged:false}}));if(ct.current)clearTimeout(ct.current);ct.current=setTimeout(()=>setState(p=>({...p,dc:{...p.dc,charging:false,charged:true}})),2800);};
   const shock=()=>{setState(p=>({...p,dc:{...p.dc,charged:false,shockDelivered:true,shockCount:p.dc.shockCount+1}}));setTimeout(()=>setState(p=>({...p,dc:{...p.dc,shockDelivered:false}})),3500);};
   const setDc=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]); // e.g. pacer knob changes on the DC screen itself
-  const lastTs=useRef(0);
+
   useEffect(()=>{
-    let stop=false;
-    const poll=async()=>{
-      try{
-        if(!window.storage)throw new Error("이 화면이 Claude 아티팩트로 열려있지 않아 저장소를 쓸 수 없어요");
-        const res=await window.storage.get(KEY(code),false);
-        if(res&&!stop){
-          const parsed=JSON.parse(res.value);
-          if(parsed._ts!==lastTs.current){
-            lastTs.current=parsed._ts;
-            // keep this device's own defibrillator state (charge/shock/pacer) local —
-            // the operator phone only drives the patient's rhythm/vitals, not the defib controls.
-            setState(p=>({...parsed,dc:p.dc}));
-          }
-          setStatus({ok:true,lastRecv:Date.now(),err:""});
-        }
-      }catch(e){
-        // "not found" is expected until an operator connects — only surface real errors
-        const msg=String(e&&e.message||e);
-        setStatus(s=>({...s,err:/not found|no such|404/i.test(msg)?"":msg}));
-      }
-      if(!stop)setTimeout(poll,400);
-    };
-    poll();
-    return()=>{stop=true;};
+    const peer=new Peer(PEER_PREFIX+code);
+    peerRef.current=peer;
+    peer.on("open",()=>setStatus(s=>({...s,err:""})));
+    peer.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err)})));
+    peer.on("connection",conn=>{
+      conn.on("data",data=>{
+        // keep this device's own defibrillator state (charge/shock/pacer) local —
+        // the operator phone only drives the patient's rhythm/vitals, not the defib controls.
+        setState(p=>({...data,dc:p.dc}));
+        setStatus(s=>({...s,connected:true,lastRecv:Date.now()}));
+      });
+      conn.on("close",()=>setStatus(s=>({...s,connected:false})));
+    });
+    return()=>peer.destroy();
   },[code]);
+
   const[,force]=useState(0);
   useEffect(()=>{const iv=setInterval(()=>force(x=>x+1),1000);return()=>clearInterval(iv);},[]);
   const secsAgo=status.lastRecv?Math.round((Date.now()-status.lastRecv)/1000):null;
@@ -924,28 +917,46 @@ function OperatorHost(){
   const[code,setCode]=useState("");
   const[joined,setJoined]=useState(false);
   const[state,setState]=useState(INIT);
-  const[status,setStatus]=useState({lastSent:0,err:""});
+  const[status,setStatus]=useState({lastSent:0,err:"",connecting:false});
   const set=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
+  const peerRef=useRef(null);
+  const connRef=useRef(null);
+
+  const connect=()=>{
+    if(code.length!==4)return;
+    setStatus({lastSent:0,err:"",connecting:true});
+    const peer=new Peer();
+    peerRef.current=peer;
+    peer.on("open",()=>{
+      const conn=peer.connect(PEER_PREFIX+code,{reliable:true});
+      connRef.current=conn;
+      conn.on("open",()=>{setJoined(true);setStatus(s=>({...s,connecting:false}));});
+      conn.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err),connecting:false})));
+    });
+    peer.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err),connecting:false})));
+  };
+
   useEffect(()=>{
-    if(!joined)return;
-    (async()=>{
-      try{
-        if(!window.storage)throw new Error("이 화면이 Claude 아티팩트로 열려있지 않아 저장소를 쓸 수 없어요");
-        const payload=JSON.stringify({...state,_ts:Date.now()});
-        await window.storage.set(KEY(code),payload,false);
-        setStatus({lastSent:Date.now(),err:""});
-      }catch(e){setStatus(s=>({...s,err:String(e&&e.message||e)}));}
-    })();
-  },[state,joined,code]);
+    if(!joined||!connRef.current)return;
+    try{
+      connRef.current.send({...state,_ts:Date.now()});
+      setStatus(s=>({...s,lastSent:Date.now(),err:""}));
+    }catch(e){setStatus(s=>({...s,err:String(e&&e.message||e)}));}
+  },[state,joined]);
+
+  useEffect(()=>()=>{if(peerRef.current)peerRef.current.destroy();},[]);
+
   const[,force]=useState(0);
   useEffect(()=>{const iv=setInterval(()=>force(x=>x+1),1000);return()=>clearInterval(iv);},[]);
   const secsAgo=status.lastSent?Math.round((Date.now()-status.lastSent)/1000):null;
+
   if(!joined){
     return(
       <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,padding:24,fontFamily:"monospace"}}>
         <div style={{color:"#4dcc4d",fontSize:14,fontWeight:"bold"}}>📱 Operator — Monitor 기기의 코드를 입력하세요</div>
         <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="1234" inputMode="numeric" style={{fontSize:32,letterSpacing:8,textAlign:"center",width:180,padding:"10px 0",background:"#111",border:"2px solid #333",color:"#4dcc4d",borderRadius:8,fontFamily:"monospace"}}/>
-        <button onClick={()=>code.length===4&&setJoined(true)} disabled={code.length!==4} style={{padding:"12px 28px",background:code.length===4?"#0c2a0c":"#111",border:`2px solid ${code.length===4?"#2fbf2f":"#222"}`,color:code.length===4?"#4dff4d":"#444",borderRadius:8,fontSize:14,fontWeight:"bold",cursor:code.length===4?"pointer":"not-allowed",fontFamily:"monospace"}}>연결</button>
+        <button onClick={connect} disabled={code.length!==4||status.connecting} style={{padding:"12px 28px",background:code.length===4?"#0c2a0c":"#111",border:`2px solid ${code.length===4?"#2fbf2f":"#222"}`,color:code.length===4?"#4dff4d":"#444",borderRadius:8,fontSize:14,fontWeight:"bold",cursor:code.length===4?"pointer":"not-allowed",fontFamily:"monospace"}}>{status.connecting?"연결 중...":"연결"}</button>
+        {status.err&&<div style={{color:"#FF5555",fontSize:12}}>⚠ {status.err}</div>}
       </div>
     );
   }
