@@ -394,7 +394,7 @@ function ValCol({label,color,big,hi,lo,unit,sub,size=42}){
 }
 
 function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,beatRrRef,beatCprRef,onChange,toggle,open}){
-  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult,cprRate,abpOn,nibp}=state;
+  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult,cprRate,abpOn,nibp,visible}=state;
   const rate=cprRate||CPR_RATE;
   const d=disp.current;
   const hrN=Math.round(beatHrRef.current),spo2N=Math.round(d.spo2),rrN=Math.round(beatRrRef.current),etN=Math.round(d.etco2);
@@ -410,6 +410,9 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
 
   const etDisplay=!etco2On?"---":(cpr?Math.max(etN,10):etN);
   const rrDisplay=bagging?10:(hp?rrN:"---");
+  const nibpMap=Math.round((nibSys+2*nibDia)/3);
+  const nibpInline=nibpMeasuring?"NIBP 측정중...":nibpResult==="fail"?"NIBP 측정 실패":`NIBP ${nibSys}/${nibDia} (${nibpMap}) mmHg`;
+  const vis={hr:true,spo2:true,rr:true,nibp:true,etco2:true,...(visible||{})};
 
   // ---- alarms ----
   const critical=DANGER.includes(rhythm)||rhythm==="asystole";
@@ -427,15 +430,15 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
 
   const rows=[
     {key:"ecg",lead:"II",c:C.ecg,h:104,sc:.27,sw:2,g:()=>({gen:ta=>ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate)}),
-      val:<ValCol label="HR" color={C.ecg} big={cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={hp?`PR (${hrN}) bpm`:undefined}/>},
+      val:<ValCol label="HR" color={C.ecg} big={vis.hr?(cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")):"---"} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={abpOn?(vis.hr&&hp?`PR (${hrN}) bpm`:undefined):(vis.nibp?nibpInline:undefined)}/> },
     ...(abpOn?[{key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
-      val:<ValCol label="ABP" color={C.abp} big={hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"} hi={ALM.bps.hi} lo={ALM.bps.lo} unit="mmHg" sub={hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined}/>}]:[]),
+      val:<ValCol label="ABP" color={C.abp} big={vis.nibp?(hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"):"---/---"} hi={ALM.bps.hi} lo={ALM.bps.lo} unit="mmHg" sub={vis.nibp?(hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined):undefined}/>}]:[]),
     {key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat(ta);if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+smoothNoise(ta,9)*.018;}return flat(ta);}}),
-      val:<ValCol label="SpO₂" color={C.spo2} big={hp?`${spo2N}`:"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>},
-    {key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{if(!etco2On)return .01;const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
-      val:<ValCol label="EtCO₂" color={C.etco2} big={etDisplay} hi={ALM.etco2.hi} lo={ALM.etco2.lo} unit="mmHg" size={32}/>},
+      val:<ValCol label="SpO₂" color={C.spo2} big={vis.spo2?(hp?`${spo2N}`:"---"):"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>},
+    ...(etco2On?[{key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{if(!etco2On)return .01;const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
+      val:<ValCol label="EtCO₂" color={C.etco2} big={vis.etco2?etDisplay:"---"} hi={ALM.etco2.hi} lo={ALM.etco2.lo} unit="mmHg" size={32}/>}]:[]),
     {key:"rr",c:C.rr,h:52,sc:.4,sw:1.6,g:()=>({gen:ta=>{if(bagging){const per=6,cph=((ta/per)%1+1)%1;return rrW(cph)*.85;}const af=envAt(ta,trans,isHp),ph=phaseAt(rrHist.current,ta)%1;return af>.02?rrW(ph)*af+(1-af)*flat(ta):flat(ta);}}),
-      val:<ValCol label="RR" color={C.rr} big={rrDisplay} hi={ALM.rr.hi} lo={ALM.rr.lo} unit="/min" size={32}/>},
+      val:<ValCol label="RR" color={C.rr} big={vis.rr?rrDisplay:"---"} hi={ALM.rr.hi} lo={ALM.rr.lo} unit="/min" size={32}/> },
   ];
 
   return(
@@ -469,14 +472,16 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
         ))}
       </div>
 
+      {abpOn&&(
       <div style={{display:"flex",borderTop:"1px solid #1c1c1c",background:"#0a0a0a",padding:"10px 16px",flexShrink:0,alignItems:"center",gap:10}}>
         <span style={{color:C.abp,fontSize:16,fontWeight:"bold"}}>NIBP</span>
         <span style={{color:nibpResult==="fail"?"#ff6666":C.abp,fontSize:nibpResult==="fail"?26:44,fontWeight:900,lineHeight:1}}>
           {nibpMeasuring?"측정중...":nibpResult==="fail"?"측정 실패":`${nibSys}/${nibDia}`}
         </span>
-        {nibpResult!=="fail"&&!nibpMeasuring&&<span style={{color:C.abp,fontSize:20,fontWeight:"bold"}}>({Math.round((nibSys+2*nibDia)/3)})</span>}
+        {nibpResult!=="fail"&&!nibpMeasuring&&<span style={{color:C.abp,fontSize:20,fontWeight:"bold"}}>({nibpMap})</span>}
         <span style={{color:"#666",fontSize:13}}>mmHg</span>
       </div>
+      )}
 
     </div>
   );
@@ -871,7 +876,7 @@ const PR=[
 ];
 
 function Panel({state,onChange,open,toggle,fullScreen}){
-  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring,abpOn}=state;
+  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring,abpOn,visible}=state;
   const[draft,setDraft]=useState({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});
   useEffect(()=>{setDraft({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});},[hr,spo2,rr,etco2,temp,nibp.sys,nibp.dia,abp.sys,abp.dia]);
   const dirty=draft.hr!==hr||draft.spo2!==spo2||draft.rr!==rr||draft.etco2!==etco2||draft.temp!==temp||draft.nibp.sys!==nibp.sys||draft.nibp.dia!==nibp.dia;
@@ -901,6 +906,12 @@ function Panel({state,onChange,open,toggle,fullScreen}){
       <input type="range" min={mn} max={mx} step={st} value={v} onChange={e=>setDraft(p=>({...p,[k]:Number(e.target.value)}))} style={{width:"100%",accentColor:col,cursor:"pointer",height:20}}/>
     </div>
   );
+  const eyeBtn=(key,label,color)=>{
+    const on=(visible&&visible[key])!==false;
+    return <button key={key} onClick={()=>onChange("visible",{...(visible||{}),[key]:!on})} style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,width:"100%",padding:"8px 10px",marginBottom:6,background:on?"#11161a":"#0d0d0d",border:`1px solid ${on?color:"#222"}`,borderRadius:6,color:on?color:"#666",cursor:"pointer",fontFamily:"monospace",fontSize:11,touchAction:"manipulation"}}>
+      <span>{label}</span><span style={{fontSize:15}}>{on?"👁":"🙈"}</span>
+    </button>;
+  };
   const body=(
     <div style={fullScreen
       ?{width:"100%",height:"100%",background:"#0b0b0b",overflowY:"auto",padding:"14px",fontFamily:"monospace",boxSizing:"border-box"}
@@ -933,6 +944,14 @@ function Panel({state,onChange,open,toggle,fullScreen}){
           {sl("SpO₂ (%)","spo2",draft.spo2,70,100,1,C.spo2)}
           {sl("RR (/min)","rr",draft.rr,0,40,1,C.rr)}
           {sl("EtCO₂ (mmHg)","etco2",draft.etco2,0,70,1,C.etco2)}
+          <div style={{marginBottom:12,padding:"10px",background:"#0d0d0d",border:"1px solid #202020",borderRadius:7}}>
+            <div style={{color:"#777",fontSize:10,fontWeight:"bold",marginBottom:8}}>👁 수치 표시 / 숨기기</div>
+            {eyeBtn("hr","HR",C.ecg)}
+            {eyeBtn("nibp",abpOn?"BP (ABP/NIBP)":"NIBP",C.abp)}
+            {eyeBtn("spo2","SpO₂",C.spo2)}
+            {eyeBtn("etco2","EtCO₂",C.etco2)}
+            {eyeBtn("rr","RR",C.rr)}
+          </div>
           <div style={{marginBottom:12,padding:"10px",background:"#0d0d0d",border:"1px solid #202020",borderRadius:7}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
               <div>
@@ -981,7 +1000,7 @@ const storeGet=(k,fallback)=>{try{const v=localStorage.getItem(k);return v?JSON.
 const storeSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}};
 const STORE={role:"acls-role-v2",code:"acls-code-v2",state:"acls-state-v2"};
 
-const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:120,dia:78},abpOn:true,etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
+const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:120,dia:78},abpOn:true,visible:{hr:true,spo2:true,rr:true,nibp:true,etco2:true},etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
 const PEER_PREFIX="acls-mon-"; // PeerJS ids must be alphanumeric-ish; prefix avoids collisions with other apps on the public broker
 
 function SimDisplay({state,set,charge,shock}){
@@ -1037,7 +1056,7 @@ function MonitorHost(){
     const c=saved&&String(saved).match(/^\d{4}$/)?String(saved):String(Math.floor(1000+Math.random()*9000));
     storeSet(STORE.code,c);return c;
   });
-  const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
+  const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},visible:{...INIT.visible,...(v.visible||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
   const[status,setStatus]=useState({connected:false,lastRecv:0,err:""});
   const ct=useRef(null);
   const peerRef=useRef(null);
@@ -1106,7 +1125,7 @@ function MonitorHost(){
 function OperatorHost(){
   const[code,setCode]=useState(()=>String(storeGet(STORE.code,"")||""));
   const[joined,setJoined]=useState(false);
-  const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
+  const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},visible:{...INIT.visible,...(v.visible||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
   const[status,setStatus]=useState({lastSent:0,err:"",connecting:false});
   const set=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
   const peerRef=useRef(null);
