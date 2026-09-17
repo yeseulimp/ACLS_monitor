@@ -17,7 +17,7 @@ const waveInterp=(t,pts)=>{
 };
 // Regular monomorphic VT: one smooth, very broad QRS complex per beat.
 // No narrow mid-complex spike/notch: the contour stays rounded throughout the wide complex.
-const VT_PTS=[[0,-.34],[.07,-1.08],[.15,-.62],[.24,.20],[.34,.78],[.44,1.08],[.54,1.13],[.64,.96],[.73,.54],[.82,-.18],[.90,-.96],[1,-.34]];
+const VT_PTS=[[0,-.26],[.10,-1.05],[.22,-.30],[.36,.74],[.48,1.03],[.58,1.10],[.68,.98],[.78,.58],[.88,-.04],[1,-.26]];
 const vtQRS=t=>waveInterp(t,VT_PTS);
 
 // Deterministic, time-based smooth noise. Unlike Math.random(), the same time point always
@@ -588,24 +588,20 @@ function RotaryDial({value,levels,onChange,size=190}){
 const DIAL_LEVELS=[0,1,2,3,5,7,10,15,20,30,50,70,100,150,200,270];
 
 function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onCharge,onShock,onChange}){
-  const{rhythm,cpr,dc,nibpResult,cprRate}=state;
+  const{rhythm,cpr,dc,cprRate}=state;
   const rate=cprRate||CPR_RATE;
-  const{energy,charged,charging,shockDelivered,shockCount,mode,pacer}=dc;
+  const{energy,charged,charging,shockDelivered,shockCount,mode,pacer,sync}=dc;
   const[flash,setFlash]=useState(false);
   const[clock,setClock]=useState(()=>new Date());
   useEffect(()=>{const iv=setInterval(()=>setClock(new Date()),1000);return()=>clearInterval(iv);},[]);
   const timeStr=clock.toLocaleTimeString("ko-KR",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
-  const d=disp.current;
-  const hrN=Math.round(beatHrRef.current),spo2N=Math.round(d.spo2);
-  const hp=isHp(rhythm);
+  const hrN=Math.round(beatHrRef.current);
   const doShock=()=>{if(!charged)return;setFlash(true);setTimeout(()=>setFlash(false),500);onShock();};
-  const st=charging?`충전 중... ${energy}J`:charged?`충전완료 ✓ ${energy}J`:shockDelivered?`${energy}J 전달됨`:energy===0?"에너지를 선택하세요":"READY";
+  const st=charging?`Charging... ${energy}J`:charged?`Charged ✓ ${energy}J`:shockDelivered?`${energy}J delivered`:energy===0?"Select energy":"READY";
   const sc=charging?"#FFB300":charged?"#2fbf2f":shockDelivered?"#FF8800":"#607080";
   const setEnergy=v=>onChange("dc",{...dc,energy:v,charged:false,charging:false});
   const pacerStep=(k,mn,mx,delta)=>onChange("dc",{...dc,pacer:{...pacer,[k]:Math.max(mn,Math.min(mx,pacer[k]+delta))}});
 
-  // --- charge sound: rising whine while charging, cut off the instant it's charged, then a
-  // short confirmation beep. Audio must be unlocked on the actual CHARGE tap (user gesture).
   const chargeAudioRef=useRef(null);
   const unlockChargeAudio=()=>{
     if(!chargeAudioRef.current){
@@ -621,13 +617,12 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
     const now=ctx.currentTime;
     osc.type="sine";
     osc.frequency.setValueAtTime(200,now);
-    osc.frequency.exponentialRampToValueAtTime(1050,now+2.65); // rising capacitor-charge whine
+    osc.frequency.exponentialRampToValueAtTime(1050,now+2.65);
     gain.gain.setValueAtTime(0,now);
     gain.gain.linearRampToValueAtTime(.16,now+.08);
     osc.connect(gain);gain.connect(ctx.destination);
     osc.start(now);
     return()=>{
-      // cut off immediately (tiny fade only to avoid a hard click) the moment charging ends
       try{
         const t=ctx.currentTime;
         gain.gain.cancelScheduledValues(t);
@@ -651,10 +646,6 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
       osc.start(now+dt);osc.stop(now+dt+.17);
     });
   },[charged]);
-  // repeating "charged and armed" reminder tone — keeps sounding until SHOCK is delivered
-  // (or the charge is disarmed by changing energy), same as a real defibrillator holding energy.
-  // A single sustained tone that slowly decays (not a staccato beep-beep), re-triggered before
-  // it fully fades so it reads as one continuous held alert rather than clipped chirps.
   useEffect(()=>{
     if(!charged)return;
     const ctx=chargeAudioRef.current;
@@ -668,7 +659,6 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
       gain.gain.exponentialRampToValueAtTime(.02,t+.62);
       osc.connect(gain);gain.connect(ctx.destination);
       osc.start(t);osc.stop(t+.65);
-      // sub-octave layer underneath for weight
       const sub=ctx.createOscillator(),subGain=ctx.createGain();
       sub.type="sine";sub.frequency.value=freq/2;
       subGain.gain.setValueAtTime(0,t);
@@ -679,24 +669,17 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
     };
     const tick=()=>{
       const now=ctx.currentTime;
-      if(now>=next){
-        tone(now,960);
-        next=now+.72;
-      }
+      if(now>=next){tone(now,960);next=now+.72;}
       raf=requestAnimationFrame(tick);
     };
     raf=requestAnimationFrame(tick);
     return()=>cancelAnimationFrame(raf);
   },[charged]);
 
-  // shock artifact timing: capture the moment SHOCK actually fires so the ECG trace can show
-  // the real defibrillation deflection at that exact instant.
   const shockTimeRef=useRef(-1);
   useEffect(()=>{if(shockDelivered)shockTimeRef.current=performance.now()/1000;},[shockDelivered]);
   const handleChargeClick=()=>{unlockChargeAudio();onCharge();};
 
-  // charge readout: while charging, count up from 0 to the target joules and show bigger,
-  // like the capacitor visibly filling — then settle back to the normal size once charged.
   const[chargeNum,setChargeNum]=useState(0);
   useEffect(()=>{
     if(!charging)return;
@@ -709,83 +692,146 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
     raf=requestAnimationFrame(loop);
     return()=>cancelAnimationFrame(raf);
   },[charging,energy]);
-  return(
-    <div style={{background:"linear-gradient(145deg,#f7f7f3,#dedfd9 55%,#c8cbc7)",height:"100%",display:"flex",fontFamily:"Arial,'Segoe UI',sans-serif",overflow:"hidden",boxShadow:"inset 0 0 34px rgba(0,0,0,.12)",border:"8px solid #ecece7",boxSizing:"border-box"}}>
-      {/* left: monitor screen */}
-      <div style={{flex:1,background:"#000",display:"flex",flexDirection:"column",margin:"18px 8px 18px 18px",borderRadius:3,overflow:"hidden",minWidth:0,boxShadow:"0 0 0 8px #26313a, 0 0 0 10px #aeb8bf, inset 0 0 14px rgba(0,0,0,.7)"}}>
-        <div style={{background:"#0f0f0f",borderBottom:"1px solid #222",padding:"5px 10px",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-          <span style={{color:"#b8c2ca",fontSize:10,letterSpacing:.7}}>NIHON KOHDEN · cardiolife · ADULT · CH1:II</span>
-          <span style={{color:"#556",fontSize:10}}>{timeStr}</span>
+
+  const currentJ=charging?chargeNum:(energy||0);
+  const panelStatus=charging?"Charging":charged?"Charged":shockDelivered?"Delivered":"Standby";
+  const smallBtn=(active=false)=>({
+    padding:"5px 9px",
+    fontSize:9,
+    lineHeight:1,
+    borderRadius:4,
+    border:`1px solid ${active?"#f6d8c2":"#9ba2a7"}`,
+    background:active?"linear-gradient(180deg,#ff8a4a,#d66125)":"linear-gradient(180deg,#8e979d,#737b81)",
+    color:active?"#fff":"#f2f2f2",
+    boxShadow:active?"inset 0 1px 0 rgba(255,255,255,.25)":"inset 0 1px 0 rgba(255,255,255,.18)"
+  });
+  const RoundStepButton=({num,label,onClick,disabled,accent,icon,activeGlow})=>(
+    <button onClick={onClick} disabled={disabled} style={{background:"none",border:"none",padding:0,cursor:disabled?"not-allowed":"pointer",opacity:disabled?.75:1,display:"block"}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <div style={{fontSize:12,fontWeight:700,color:"#ffffff",width:50,textAlign:"right",lineHeight:1.1,whiteSpace:"pre-line"}}>{label}</div>
+        <div style={{position:"relative",width:62,height:62,borderRadius:"50%",border:`4px solid ${accent}`,background:`linear-gradient(160deg,#f8f8f4,#d9d9d4 60%,#c7c7c2)`,boxShadow:activeGlow?`0 0 0 3px rgba(255,153,0,.18), 0 0 14px rgba(255,102,0,.35), inset 0 1px 2px rgba(255,255,255,.9)`:`0 2px 6px rgba(0,0,0,.25), inset 0 1px 2px rgba(255,255,255,.85)`}}>
+          <div style={{position:"absolute",inset:9,borderRadius:"50%",background:disabled?"linear-gradient(160deg,#e7e7e1,#d3d3ce)":`linear-gradient(160deg,${accent==="#ff8a00"?"#ffd6a3,#ff9a2b":"#ffc2b7,#ff6255"})`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:26,fontWeight:900,color:disabled?"#9ba3aa":"#fff",textShadow:disabled?"none":"0 1px 1px rgba(0,0,0,.35)"}}>{icon}</div>
+          <div style={{position:"absolute",right:-6,bottom:-5,width:24,height:24,borderRadius:"50%",background:"#3c8bd9",border:"2px solid #fff",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,fontWeight:900,color:"#fff",boxShadow:"0 1px 3px rgba(0,0,0,.35)"}}>{num}</div>
         </div>
-        <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0}}>
-          <div style={{flex:1,display:"flex",minHeight:0}}>
-            <div style={{width:70,padding:"4px 6px",flexShrink:0}}><div style={{fontSize:8,color:"#4a4"}}>HR<br/>bpm</div></div>
-            <div style={{flex:1,minWidth:0}}><Wave getState={()=>({gen:ta=>{const sa=shockArtifact(ta-shockTimeRef.current);return sa!==null?sa:ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate);}})} color="#00FF00" h={95} scale={.28} sw={1.8} grid/></div>
-            <div style={{width:70,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontSize:30,fontWeight:"bold",color:"#00FF00"}}>{cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")}</span></div>
+      </div>
+    </button>
+  );
+
+  return(
+    <div style={{background:"linear-gradient(180deg,#efefeb,#d8dad7 32%,#babdc0 100%)",height:"100%",display:"flex",fontFamily:"Arial,'Segoe UI',sans-serif",overflow:"hidden",boxShadow:"inset 0 0 34px rgba(0,0,0,.13)",border:"10px solid #e7e8e5",boxSizing:"border-box",position:"relative"}}>
+      <div style={{position:"absolute",top:0,left:"36%",transform:"translateX(-50%)",width:160,height:16,background:"linear-gradient(180deg,#ffffff,#e9ebef)",borderBottomLeftRadius:18,borderBottomRightRadius:18,opacity:.95}}/>
+
+      <div style={{flex:1,background:"#000",display:"flex",flexDirection:"column",margin:"18px 8px 18px 18px",borderRadius:3,overflow:"hidden",minWidth:0,boxShadow:"0 0 0 2px #1b2024, 0 0 0 7px #333b42, 0 0 0 9px #aab3ba, inset 0 0 16px rgba(0,0,0,.75)"}}>
+        <div style={{height:26,background:"#05080a",display:"flex",justifyContent:"space-between",alignItems:"center",padding:"0 10px",borderBottom:"1px solid #1f262c",flexShrink:0}}>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <span style={{color:"#dce3e8",fontSize:10,fontWeight:700,letterSpacing:.4}}>NIHON KOHDEN</span>
+            <span style={{color:"#82909c",fontSize:8}}>Adult</span>
           </div>
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span style={{color:"#5a6772",fontSize:8}}>cardiolife</span>
+            <span style={{color:"#556",fontSize:9}}>{timeStr}</span>
+          </div>
+        </div>
+        <div style={{flex:1,position:"relative",minHeight:0,paddingTop:6}}>
+          <div style={{position:"absolute",top:6,left:10,display:"flex",gap:6,zIndex:2}}>
+            {[["Report",false],["Large",false],["12-lead ECG",true]].map(([txt,active])=><div key={txt} style={{padding:"4px 7px",borderRadius:3,border:`1px solid ${active?"#69bce8":"#3b5165"}`,background:active?"#173a55":"#0f161d",color:active?"#dff6ff":"#8aa1b5",fontSize:8,lineHeight:1}}>{txt}</div>)}
+          </div>
+          <div style={{position:"absolute",top:14,left:16,color:"#7cff47",fontSize:10,fontWeight:700,zIndex:2}}>HR</div>
+          <div style={{position:"absolute",top:18,right:14,width:16,height:10,border:"2px solid #35ff35",borderRadius:2,zIndex:2}}><div style={{position:"absolute",right:-4,top:2,width:2,height:4,background:"#35ff35"}}/></div>
+          <div style={{position:"absolute",top:28,right:16,color:"#7cff47",fontSize:8,zIndex:2}}>15%</div>
+          <div style={{position:"absolute",top:52,left:8,right:8,bottom:64}}>
+            <Wave getState={()=>({gen:ta=>{const sa=shockArtifact(ta-shockTimeRef.current);return sa!==null?sa:ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate);}})} color="#00FF00" h={190} scale={.30} sw={1.5}/>
+          </div>
+          <div style={{position:"absolute",top:40,left:84,color:"#7cff47",fontSize:11,fontWeight:700,lineHeight:1.05,zIndex:2}}>{cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")}<br/><span style={{fontSize:8,fontWeight:400}}>bpm</span><br/><span style={{fontSize:8}}>30</span></div>
+
+          {mode==="manual"&&(
+            <div style={{position:"absolute",left:112,bottom:10,width:390,height:156,border:"2px solid #ff6e35",borderRadius:4,background:"#040404",boxShadow:"0 0 0 1px rgba(255,110,53,.35) inset"}}>
+              <div style={{display:"grid",gridTemplateColumns:"150px repeat(4,1fr)",alignItems:"stretch",height:30}}>
+                <div style={{background:"#ff7b3c",color:"#fff",fontSize:22,padding:"4px 14px",display:"flex",alignItems:"center"}}>Manual</div>
+                <button style={{...smallBtn(true),margin:2}} onClick={()=>onChange("dc",{...dc,mode:"manual"})}>Defib</button>
+                <button style={{...smallBtn(sync),margin:2}} onClick={()=>onChange("dc",{...dc,sync:!sync})}>Sync</button>
+                <button style={{...smallBtn(false),margin:2}}>ECG Sens/<br/>Lead</button>
+                <button style={{...smallBtn(false),margin:2}}>Wave2<br/>Select</button>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",borderTop:"2px solid #ff6e35",color:"#fff",height:32}}>
+                <div style={{borderRight:"2px solid #ff6e35",display:"flex",alignItems:"center",justifyContent:"center",gap:8,fontSize:12}}><span style={{opacity:.8}}>Shocks</span><span style={{fontSize:18}}>{shockCount}</span></div>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 12px",fontSize:12}}><span style={{opacity:.8}}>Energy</span><span style={{fontSize:18}}>{energy||0}J</span></div>
+              </div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 140px 118px",height:92,borderTop:"2px solid #ff6e35"}}>
+                <div style={{borderRight:"2px solid #ff6e35",background:"#060606"}}/>
+                <div style={{borderRight:"2px solid #ff6e35",background:"#ff7b3c",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8}}>
+                  <div style={{fontSize:12,color:"#444"}}>OP Sound</div>
+                  <button style={{width:76,height:26,border:"none",borderRadius:4,background:"#8d959b",color:"#fff",fontSize:12}}>On</button>
+                </div>
+                <div style={{background:"#ff7b3c",display:"flex",flexDirection:"column",justifyContent:"space-between",padding:"8px 10px 10px 10px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:"#542c11",fontWeight:700}}><span>{panelStatus}</span><span style={{width:14,height:22,background:"#111",display:"inline-block"}}/></div>
+                  <div style={{fontSize:28,color:"#000",fontWeight:700,textAlign:"right"}}>{currentJ}J</div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {mode==="aed"&&(
+            <div style={{position:"absolute",left:140,bottom:24,width:250,height:80,border:"2px solid #ff6e35",background:"#121212",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",color:"#fff"}}>
+              <div style={{fontSize:20,color:"#ff7b3c",fontWeight:700}}>AED</div>
+              <div style={{fontSize:12,color:"#ccc",marginTop:6}}>Pads analysis standby</div>
+            </div>
+          )}
+
           {mode==="pacer"&&(
-            <div style={{padding:"6px 10px",background:"#05080f",borderTop:"1px solid #0c2040",flexShrink:0}}>
-              <div style={{color:"#2266AA",fontSize:10,fontWeight:"bold",marginBottom:4}}>PACING</div>
-              <div style={{display:"flex",gap:12,alignItems:"flex-end",flexWrap:"wrap"}}>
+            <div style={{position:"absolute",left:104,bottom:12,width:408,height:140,border:"2px solid #2e73b5",background:"#05080f",borderRadius:4,padding:10,color:"#d1e6ff"}}>
+              <div style={{fontSize:18,fontWeight:700,marginBottom:8,color:"#53a2ff"}}>Pacing</div>
+              <div style={{display:"flex",gap:18,alignItems:"center",justifyContent:"space-between"}}>
                 {[{k:"rate",l:"RATE (ppm)",mn:30,mx:200,st:5},{k:"output",l:"OUTPUT (mA)",mn:0,mx:200,st:10}].map(x=>(
-                  <div key={x.k}><div style={{color:"#1a3a5a",fontSize:8,marginBottom:2}}>{x.l}</div>
-                    <div style={{display:"flex",alignItems:"center",gap:4}}>
-                      <button onClick={()=>pacerStep(x.k,x.mn,x.mx,-x.st)} style={{background:"#0a0a0a",border:"1px solid #1e1e1e",color:"#666",width:20,height:20,cursor:"pointer",borderRadius:2,fontSize:12}}>−</button>
-                      <span style={{color:"#2288CC",fontSize:16,fontWeight:"bold",width:40,textAlign:"center"}}>{pacer[x.k]}</span>
-                      <button onClick={()=>pacerStep(x.k,x.mn,x.mx,x.st)} style={{background:"#0a0a0a",border:"1px solid #1e1e1e",color:"#666",width:20,height:20,cursor:"pointer",borderRadius:2,fontSize:12}}>+</button>
+                  <div key={x.k} style={{display:"flex",flexDirection:"column",gap:6}}>
+                    <div style={{fontSize:11,color:"#8fbae3"}}>{x.l}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:6}}>
+                      <button onClick={()=>pacerStep(x.k,x.mn,x.mx,-x.st)} style={{width:28,height:28,borderRadius:4,border:"1px solid #21486f",background:"#0f2237",color:"#fff",fontSize:16}}>−</button>
+                      <div style={{width:62,textAlign:"center",fontSize:24,fontWeight:700,color:"#53a2ff"}}>{pacer[x.k]}</div>
+                      <button onClick={()=>pacerStep(x.k,x.mn,x.mx,x.st)} style={{width:28,height:28,borderRadius:4,border:"1px solid #21486f",background:"#0f2237",color:"#fff",fontSize:16}}>+</button>
                     </div>
                   </div>
                 ))}
-                <button onClick={()=>onChange("dc",{...dc,pacer:{...pacer,on:!pacer.on}})} style={{padding:"5px 12px",background:pacer.on?"#003300":"#0c0c0c",border:`2px solid ${pacer.on?"#00CC00":"#1e1e1e"}`,color:pacer.on?"#00FF00":"#333",cursor:"pointer",fontSize:10,fontWeight:"bold",borderRadius:4}}>{pacer.on?"⚡ PACING":"OFF"}</button>
+                <button onClick={()=>onChange("dc",{...dc,pacer:{...pacer,on:!pacer.on}})} style={{padding:"10px 16px",background:pacer.on?"#003300":"#0c0c0c",border:`2px solid ${pacer.on?"#00CC00":"#1e1e1e"}`,color:pacer.on?"#00FF00":"#7d8791",cursor:"pointer",fontSize:14,fontWeight:"bold",borderRadius:6}}>{pacer.on?"⚡ PACING ON":"PACING OFF"}</button>
               </div>
             </div>
           )}
         </div>
-        <div style={{display:"flex",gap:2,padding:"5px 6px",background:"#111",flexShrink:0}}>
-          {["LIMITS","TREND","NIBP","ALARMS","MENU"].map(l=>
-            <div key={l} style={{flex:1,textAlign:"center",padding:"6px 2px",background:"#3a3a6a",color:"#dde",fontSize:9,fontWeight:"bold",borderRadius:3}}>{l}</div>
-          )}
-        </div>
-        <div style={{background:"#0a0a0a",padding:"6px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-          <div><span style={{color:sc,fontSize:11,fontWeight:"bold"}}>{st}</span>{shockCount>0&&<span style={{color:"#556",fontSize:9,marginLeft:8}}>제세동 {shockCount}회</span>}</div>
-          <div style={{fontSize:charging?36:20,fontWeight:"bold",color:energy===0?"#445":"#FF8800",transition:"font-size .15s",lineHeight:1}}>{charging?chargeNum:(energy===0?"--":energy)}<span style={{fontSize:charging?16:11,color:"#556"}}>J</span></div>
+        <div style={{display:"flex",justifyContent:"space-around",alignItems:"center",height:54,background:"#2f3942",borderTop:"1px solid #68737c",padding:"0 10px",flexShrink:0,position:"relative"}}>
+          {[["⏭","Event"],["⌂","Home"],["▣","Menu"],["◉","Start/Stop"],["◔","Interval"],["△","Silence Alarms"]].map(([icon,label])=><div key={label} style={{display:"flex",flexDirection:"column",alignItems:"center",gap:4,color:"#ebf0f5",fontSize:9}}><div style={{width:24,height:24,borderRadius:"50%",border:"1px solid #d2dae1",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12}}>{icon}</div><div>{label}</div></div>)}
+          <div style={{position:"absolute",bottom:16,left:"50%",transform:"translateX(-50%)",color:"#dce6ef",fontSize:9,borderBottom:"2px solid #dce6ef",padding:"0 22px 2px 22px"}}>NIBP</div>
         </div>
       </div>
 
-      {/* right: light control panel */}
-      <div style={{width:270,flexShrink:0,background:flash?"linear-gradient(165deg,#fff9df,#f1e6a7)":"linear-gradient(165deg,#f4f4ef,#dedfd8)",display:"flex",flexDirection:"column",alignItems:"center",padding:"12px 14px",transition:"background .15s",overflowY:"auto",borderLeft:"7px solid #245f9f",boxShadow:"inset 2px 0 0 #fff, inset 9px 0 0 #c7d5e2"}}>
-        <div style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
-          <div><div style={{fontSize:10,color:"#23394c",fontWeight:900,letterSpacing:.4}}>cardiolife</div><div style={{fontSize:8,color:"#6d7478"}}>TEC-5600 TRAINING PANEL</div></div>
-          <div style={{width:12,height:12,borderRadius:"50%",background:"#4c9b42",boxShadow:"0 0 0 2px #b9c4b8, 0 0 6px #65b85b"}}/>
+      <div style={{width:244,flexShrink:0,background:flash?"linear-gradient(180deg,#6f7580,#4a5260 16%,#3b4550 100%)":"linear-gradient(180deg,#75808a,#57606b 16%,#454f59 100%)",display:"flex",flexDirection:"column",alignItems:"center",padding:"12px 10px",transition:"background .15s",overflowY:"auto",boxShadow:"inset 1px 0 0 rgba(255,255,255,.25), inset 10px 0 14px rgba(255,255,255,.06)"}}>
+        <div style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:4}}>
+          <div style={{display:"flex",alignItems:"center",gap:6}}>
+            <div style={{width:16,height:16,borderRadius:"50%",border:"2px solid #9cc9ef",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:"#d8efff"}}>↔</div>
+            <div style={{width:28,height:28,borderRadius:"50%",background:"radial-gradient(circle at 35% 30%,#79ff6d,#38af2e 70%)",boxShadow:"0 0 0 2px rgba(255,255,255,.35), 0 0 8px rgba(130,255,120,.55)"}}/>
+          </div>
+          <div style={{fontSize:11,color:"#f1f1f1",fontWeight:700,marginTop:2}}>cardiolife</div>
         </div>
-        <div style={{display:"flex",gap:4,width:"100%",marginBottom:8}}>
-          {[["manual","MONITOR"],["aed","AED"],["pacer","PACING"]].map(([m,l])=><button key={m} onClick={()=>onChange("dc",{...dc,mode:m})} style={{flex:1,padding:"5px 2px",background:mode===m?"#315f8f":"#e7e7e1",border:`1px solid ${mode===m?"#21486f":"#aeb2ad"}`,color:mode===m?"#fff":"#4d5254",cursor:"pointer",fontSize:8,fontWeight:"bold",borderRadius:2}}>{l}</button>)}
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",position:"relative",marginTop:2}}>
+          <div style={{position:"absolute",left:-8,top:88,fontSize:11,color:"#fff",fontWeight:700}}>Defib</div>
+          <div style={{position:"absolute",left:-4,top:106,fontSize:11,color:"#dce2e7"}}>Monitor</div>
+          <div style={{position:"absolute",left:12,top:134,fontSize:11,color:"#fff",fontWeight:700}}>AED</div>
+          <div style={{position:"absolute",left:80,top:156,fontSize:12,color:"#fff",fontWeight:700}}>Off</div>
+          <div style={{position:"absolute",right:12,top:134,fontSize:11,color:"#fff",fontWeight:700}}>Test</div>
+          <div style={{position:"absolute",right:-2,top:106,fontSize:11,color:"#ffb066",fontWeight:700}}>Pacing</div>
+          <div style={{position:"absolute",right:16,bottom:14,fontSize:46,color:"#ff9b44",fontWeight:800,lineHeight:1}}>1</div>
+          <div style={{padding:6,borderRadius:"50%",background:"radial-gradient(circle at 35% 30%,#fff,#b5bdc7 68%,#949da8 100%)",boxShadow:"0 3px 8px rgba(0,0,0,.35), inset 0 1px 2px rgba(255,255,255,.85)"}}>
+            <RotaryDial value={energy} levels={DIAL_LEVELS} onChange={setEnergy} size={174}/>
+          </div>
         </div>
-
-        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
-          <span style={{width:28,height:28,borderRadius:"50%",background:"#1a5fa8",border:"2px solid #fff",color:"#fff",fontSize:16,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 1px 3px rgba(0,0,0,.4)",flexShrink:0}}>1</span>
-          <span style={{color:"#33414d",fontSize:10,fontWeight:"bold",textShadow:"0 1px 0 rgba(255,255,255,.5)"}}>ENERGY / MODE SELECT</span>
+        <div style={{display:"flex",flexDirection:"column",gap:10,marginTop:2}}>
+          <RoundStepButton num="2" label={mode==="aed"?"Charge\nAED":"Charge"} onClick={handleChargeClick} disabled={charged||charging||energy===0} accent="#ff8a00" icon={charging?"⏳":"⚡"} activeGlow={charging||charged}/>
+          <RoundStepButton num="3" label="Shock" onClick={doShock} disabled={!charged} accent="#ff8a00" icon="⚡" activeGlow={charged}/>
         </div>
-        <div style={{padding:6,borderRadius:"50%",background:"radial-gradient(circle at 35% 30%,#fff,#aab4bd 70%)",boxShadow:"0 3px 8px rgba(0,0,0,.3), inset 0 1px 2px rgba(255,255,255,.8)"}}>
-          <RotaryDial value={energy} levels={DIAL_LEVELS} onChange={setEnergy} size={178}/>
+        <div style={{marginTop:10,width:"100%",padding:"8px 10px",borderRadius:8,background:"rgba(0,0,0,.18)",boxShadow:"inset 0 1px 0 rgba(255,255,255,.12)"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:11,color:"#f4f4f4"}}><span>Status</span><span style={{color:sc,fontWeight:700}}>{st}</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:5,fontSize:11,color:"#d7dde3"}}><span>Energy</span><span style={{fontSize:18,fontWeight:700,color:"#ffb14b"}}>{charging?chargeNum:(energy||0)}J</span></div>
+          <div style={{display:"flex",justifyContent:"space-between",marginTop:4,fontSize:11,color:"#d7dde3"}}><span>Shocks</span><span>{shockCount}</span></div>
         </div>
-        <div style={{fontSize:9,color:"#4a5966",marginTop:6,marginBottom:10,textAlign:"center"}}>1  SELECT ENERGY (J)</div>
-
-        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
-          <span style={{width:9,height:9,borderRadius:"50%",background:energy>0?"#c62828":"#9aa7b4",display:"inline-block",boxShadow:energy>0?"0 0 5px #c6282888":"none"}}/>
-          <span style={{fontSize:10,fontWeight:"bold",color:"#8a2020",letterSpacing:.5}}>{mode==="aed"?"AED MODE":mode==="pacer"?"PACER MODE":"MANUAL DEFIB"}</span>
-        </div>
-
-        <ArcButton size={92} num="2" label="CHARGE" onClick={handleChargeClick} disabled={charged||charging||energy===0}
-          bg={charged?"linear-gradient(160deg,#eef2f5,#c7d0d8)":charging?"linear-gradient(160deg,#ffd75e,#e0a800)":energy===0?"linear-gradient(160deg,#eef2f5,#c7d0d8)":"linear-gradient(160deg,#ffb04d,#e07800)"}
-          ring={charged?"#9aa7b4":charging?"#a87700":energy===0?"#9aa7b4":"#a35c00"}
-          textColor="#5a3a10" icon={charging?"⏳":charged?"✓":"⚡"}
-          sub={charging?"충전 중...":charged?"충전완료":null}/>
-        <div style={{height:14}}/>
-        <ArcButton size={92} num="3" label="SHOCK" onClick={doShock} disabled={!charged}
-          bg={charged?"linear-gradient(160deg,#ff5252,#b71c1c)":"linear-gradient(160deg,#eef2f5,#c7d0d8)"}
-          ring={charged?"#7a0000":"#9aa7b4"} textColor={charged?"#fff":"#8a95a0"} icon="⚡"
-          glow={charged}/>
       </div>
     </div>
   );
