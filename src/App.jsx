@@ -430,9 +430,10 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
 
   const rows=[
     {key:"ecg",lead:"II",c:C.ecg,h:104,sc:.27,sw:2,g:()=>({gen:ta=>ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate)}),
-      val:<ValCol label="HR" color={C.ecg} big={vis.hr?(cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")):"---"} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={abpOn?(vis.hr&&hp?`PR (${hrN}) bpm`:undefined):(vis.nibp?nibpInline:undefined)}/> },
+      val:<ValCol label="HR" color={C.ecg} big={vis.hr?(cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")):"---"} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={abpOn&&(vis.hr&&hp)?`PR (${hrN}) bpm`:undefined}/> },
     ...(abpOn?[{key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
-      val:<ValCol label="ABP" color={C.abp} big={vis.nibp?(hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"):"---/---"} hi={ALM.bps.hi} lo={ALM.bps.lo} unit="mmHg" sub={vis.nibp?(hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined):undefined}/>}]:[]),
+      val:<ValCol label="ABP" color={C.abp} big={vis.nibp?(hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"):"---/---"} hi={ALM.bps.hi} lo={ALM.bpd.lo} unit="mmHg" sub={vis.nibp?(hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined):undefined}/>}]:[{key:"nibpOnly",blank:true,c:C.abp,h:82,sc:.34,sw:0,g:()=>({gen:ta=>flat(ta)}),
+      val:<ValCol label="NIBP" color={C.abp} big={vis.nibp?(nibpResult==="fail"?"FAIL":`${nibSys}/${nibDia}`):"---/---"} hi={ALM.bps.hi} lo={ALM.bpd.lo} unit="mmHg" sub={vis.nibp?(nibpMeasuring?"측정중...":nibpResult==="fail"?undefined:`(${nibpMap})`):undefined} size={48}/>}]),
     {key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat(ta);if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+smoothNoise(ta,9)*.018;}return flat(ta);}}),
       val:<ValCol label="SpO₂" color={C.spo2} big={vis.spo2?(hp?`${spo2N}`:"---"):"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>},
     ...(etco2On?[{key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{if(!etco2On)return .01;const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
@@ -466,7 +467,7 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
               <span style={{position:"absolute",top:2,left:4,color:"#555",fontSize:10,zIndex:2}}>150</span>
               <span style={{position:"absolute",bottom:2,left:4,color:"#555",fontSize:10,zIndex:2}}>0</span>
             </>}
-            <div style={{flex:1,minWidth:0}}><Wave getState={r.g} color={r.c} h={r.h} scale={r.sc} sw={r.sw} grid={r.key==="ecg"}/></div>
+            <div style={{flex:1,minWidth:0}}>{r.blank?<div style={{height:r.h,background:"#000"}}/>:<Wave getState={r.g} color={r.c} h={r.h} scale={r.sc} sw={r.sw} grid={r.key==="ecg"}/>}</div>
             {r.val}
           </div>
         ))}
