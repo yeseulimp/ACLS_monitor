@@ -4,15 +4,56 @@ import Peer from "peerjs";
 const g = (x,m,s,a) => a*Math.exp(-0.5*((x-m)/s)**2);
 const normalQRST=t=>g(t,.13,.03,.11)+g(t,.225,.007,-.1)+g(t,.248,.013,1.1)+g(t,.272,.007,-.22)+g(t,.43,.055,.21);
 const stemiQRST=t=>g(t,.13,.03,.11)+g(t,.225,.007,-.1)+g(t,.248,.013,1.1)+g(t,.272,.007,-.22)+g(t,.335,.05,.30)+g(t,.44,.06,.32);
-const vtQRS=t=>g(t,.30,.06,1.35)+g(t,.72,.13,-.4);
-const vfWave=t=>(Math.sin(t*28.5+Math.sin(t*6.3)*.85)+Math.sin(t*18.2+2.1)*.58+Math.sin(t*42)*.28+(Math.random()-.5)*.35)*.43;
+const waveInterp=(t,pts)=>{
+  const x=((t%1)+1)%1;
+  for(let i=0;i<pts.length-1;i++){
+    const[a,va]=pts[i],[b,vb]=pts[i+1];
+    if(x>=a&&x<=b){
+      const f=(x-a)/((b-a)||1),sf=f*f*(3-2*f);
+      return va+(vb-va)*sf;
+    }
+  }
+  return pts[0][1];
+};
+// Regular monomorphic VT: broad rounded positive complex followed by a deep narrow trough.
+// This profile is intentionally closer to the teaching-reference shape than a narrow QRS spike.
+const VT_PTS=[[0,-.38],[.055,-1.32],[.115,.18],[.19,.93],[.30,1.22],[.43,1.32],[.57,1.08],[.67,.62],[.78,-1.25],[.84,-1.48],[.91,-.28],[1,-.38]];
+const vtQRS=t=>waveInterp(t,VT_PTS);
+
+// Deterministic, time-based smooth noise. Unlike Math.random(), the same time point always
+// returns the same value, so an already-drawn trace does not "boil" or jitter between frames.
+const fract=x=>x-Math.floor(x);
+const noiseHash=x=>fract(Math.sin(x*127.1)*43758.5453123);
+const noiseSmooth=f=>f*f*(3-2*f);
+function smoothNoise(t,scale=1){
+  const x=t*scale,i=Math.floor(x),f=x-i;
+  const a=noiseHash(i),b=noiseHash(i+1);
+  return ((a+(b-a)*noiseSmooth(f))-.5)*2;
+}
+
+// Coarse VF: irregular and chaotic, but continuous rather than frame-by-frame random.
+// Elapsed time drives VF independently of the numeric HR readout.
+const vfWave=t=>{
+  const carrier=
+    Math.sin(t*27.5+Math.sin(t*5.7)*.55)*.24 +
+    Math.sin(t*18.8+1.9)*.16 +
+    Math.sin(t*39.0+.4)*.07;
+  const envelope=.88+smoothNoise(t,.65)*.18;
+  const drift=smoothNoise(t,.9)*.045;
+  const micro=smoothNoise(t,8.5)*.012;
+  return carrier*envelope+drift+micro;
+};
+
+// Near-flat baseline with only minimal continuous drift, closer to a real monitor trace.
+const flat=t=>smoothNoise(t,.55)*.0025+Math.sin(t*.65)*.0012;
+
 function ecgWave(t,rhythm,cprFrac,ta,cprRate){
   let v;
   if(rhythm==="nsr"||rhythm==="pea")v=normalQRST(t);
   else if(rhythm==="stemi")v=stemiQRST(t);
   else if(rhythm==="vt"||rhythm==="vtp")v=vtQRS(t);
-  else if(rhythm==="vf")v=vfWave(t);
-  else v=(Math.random()-.5)*.016; // asystole
+  else if(rhythm==="vf")v=vfWave(ta||t); // VF uses elapsed time, not HR phase, so it never freezes when HR is 0
+  else v=flat(ta||t); // asystole
   if(!cprFrac)return v;
   // Chest compressions don't erase the underlying electrical signal — they add a large motion
   // artifact on top of it. As compressions ramp in/out (cprFrac 0→1→0) the true rhythm gets
@@ -28,12 +69,11 @@ function cprEcgArtifact(ta,rate=110){
   const per=60/rate,ct=((ta/per)%1+1)%1;
   const main=Math.pow(Math.sin(Math.PI*ct),1.15)*1.3; // one smooth wide arch per compression
   const notch=g(ct,.5,.05,-.22); // small notch at the crest for the gentle double-peak look
-  return main+notch-.12+(Math.random()-.5)*.09; // light motion-artifact noise only
+  return main+notch-.12+smoothNoise(ta,10)*.028; // subtle continuous lead-motion artifact
 }
 const spo2W=t=>t<.22?Math.pow(Math.sin(t/.22*Math.PI/2),.68):Math.pow(Math.max(0,1-(t-.22)/.78),1.45)*.82+(t>.42&&t<.56?Math.sin((t-.42)/.14*Math.PI)*.12:0);
 const etW=t=>t<.07?.01:t<.17?(t-.07)/.1:t<.68?1+.04*(t-.17)/.51:t<.82?1.04*(1-(t-.68)/.14):.01;
 const rrW=t=>.5+.46*Math.sin(t*2*Math.PI-.1);
-const flat=()=>(Math.random()-.5)*.016;
 // The huge, flat-topped "square" deflection an ECG amplifier shows the instant a shock is
 // delivered (the amplifier briefly saturates from the discharge) — rises fast, clips flat, falls fast.
 function shockArtifact(dt){
@@ -259,17 +299,63 @@ function useEngine(state){
   return{dispRef,transRef,dampTransRef,cprTransRef,hrHist,rrHist,beatHrRef,beatRrRef,beatCprRef};
 }
 
-function Wave({getState,color,h=80,scale=.35,sw=1.8}){
+function Wave({getState,color,h=80,scale=.35,sw=1.8,grid=false}){
   const cvs=useRef(null),raf=useRef(null),gs=useRef(getState);
   gs.current=getState;
   useEffect(()=>{
-    const el=cvs.current,ctx=el.getContext("2d"),W=el.width,H=el.height,DS=6,EP=14;
+    const el=cvs.current;
+    let ctx=null,W=0,H=h,dpr=1,ro=null;
+    const DS=6,EP=14;
+
+    const setup=()=>{
+      if(!el)return;
+      dpr=Math.max(1,window.devicePixelRatio||1);
+      W=Math.max(1,Math.round(el.getBoundingClientRect().width||1100));
+      H=h;
+      el.width=Math.round(W*dpr);
+      el.height=Math.round(H*dpr);
+      el.style.height=`${H}px`;
+      ctx=el.getContext("2d");
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+      ctx.lineJoin="round";
+      ctx.lineCap="round";
+      ctx.imageSmoothingEnabled=true;
+    };
+
+    const drawGrid=()=>{
+      if(!grid||!ctx)return;
+      // Very subtle monitor-style reference grid: visible enough to orient the trace, not ECG-paper red.
+      const minor=10,major=50;
+      ctx.save();
+      ctx.lineWidth=.5;
+      for(let x=0;x<=W;x+=minor){
+        ctx.strokeStyle=(x%major===0)?"rgba(35,80,35,.16)":"rgba(35,80,35,.065)";
+        ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();
+      }
+      for(let y=0;y<=H;y+=minor){
+        ctx.strokeStyle=(y%major===0)?"rgba(35,80,35,.16)":"rgba(35,80,35,.065)";
+        ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    setup();
+    if(typeof ResizeObserver!=="undefined"){
+      ro=new ResizeObserver(()=>setup());
+      ro.observe(el);
+    }
+
     const f=()=>{
+      if(!ctx){raf.current=requestAnimationFrame(f);return;}
       const now=performance.now()/1000;
       const{gen}=gs.current();
       ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);
+      drawGrid();
       const cx=Math.floor((now%DS)/DS*W);
-      ctx.strokeStyle=color;ctx.lineWidth=sw;ctx.shadowColor=color;ctx.shadowBlur=3;
+      ctx.strokeStyle=color;
+      ctx.lineWidth=sw;
+      ctx.shadowColor=color;
+      ctx.shadowBlur=1.1; // restrained phosphor glow; avoids a fuzzy/game-like trace
       ctx.beginPath();let first=true;
       for(let px=0;px<W;px++){
         if(((px-cx+W)%W)<EP){first=true;continue;}
@@ -281,9 +367,9 @@ function Wave({getState,color,h=80,scale=.35,sw=1.8}){
       ctx.stroke();ctx.shadowBlur=0;raf.current=requestAnimationFrame(f);
     };
     raf.current=requestAnimationFrame(f);
-    return()=>cancelAnimationFrame(raf.current);
-  },[color,sw,scale]);
-  return <canvas ref={cvs} width={1100} height={h} style={{width:"100%",display:"block",height:h}}/>;
+    return()=>{cancelAnimationFrame(raf.current);if(ro)ro.disconnect();};
+  },[color,sw,scale,h,grid]);
+  return <canvas ref={cvs} style={{width:"100%",display:"block",height:h}}/>;
 }
 
 function ValCol({label,color,big,hi,lo,unit,sub,size=42}){
@@ -337,11 +423,11 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
       val:<ValCol label="HR" color={C.ecg} big={cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={hp?`PR (${hrN}) bpm`:undefined}/>},
     {key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
       val:<ValCol label="BP" color={C.abp} big={hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"} hi={ALM.bps.hi} lo={ALM.bps.lo} unit="mmHg" sub={hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined}/>},
-    {key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat();if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+(Math.random()-.5)*.06;}return flat();}}),
+    {key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat(ta);if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+smoothNoise(ta,9)*.018;}return flat(ta);}}),
       val:<ValCol label="SpO₂" color={C.spo2} big={hp?`${spo2N}`:"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>},
     {key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{if(!etco2On)return .01;const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
       val:<ValCol label="EtCO₂" color={C.etco2} big={etDisplay} hi={ALM.etco2.hi} lo={ALM.etco2.lo} unit="mmHg" size={32}/>},
-    {key:"rr",c:C.rr,h:52,sc:.4,sw:1.6,g:()=>({gen:ta=>{if(bagging){const per=6,cph=((ta/per)%1+1)%1;return rrW(cph)*.85;}const af=envAt(ta,trans,isHp),ph=phaseAt(rrHist.current,ta)%1;return af>.02?rrW(ph)*af+(1-af)*flat():flat();}}),
+    {key:"rr",c:C.rr,h:52,sc:.4,sw:1.6,g:()=>({gen:ta=>{if(bagging){const per=6,cph=((ta/per)%1+1)%1;return rrW(cph)*.85;}const af=envAt(ta,trans,isHp),ph=phaseAt(rrHist.current,ta)%1;return af>.02?rrW(ph)*af+(1-af)*flat(ta):flat(ta);}}),
       val:<ValCol label="RR" color={C.rr} big={rrDisplay} hi={ALM.rr.hi} lo={ALM.rr.lo} unit="/min" size={32}/>},
   ];
 
@@ -370,7 +456,7 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
               <span style={{position:"absolute",top:2,left:4,color:"#555",fontSize:10,zIndex:2}}>150</span>
               <span style={{position:"absolute",bottom:2,left:4,color:"#555",fontSize:10,zIndex:2}}>0</span>
             </>}
-            <div style={{flex:1,minWidth:0}}><Wave getState={r.g} color={r.c} h={r.h} scale={r.sc} sw={r.sw}/></div>
+            <div style={{flex:1,minWidth:0}}><Wave getState={r.g} color={r.c} h={r.h} scale={r.sc} sw={r.sw} grid={r.key==="ecg"}/></div>
             {r.val}
           </div>
         ))}
@@ -617,17 +703,17 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
     return()=>cancelAnimationFrame(raf);
   },[charging,energy]);
   return(
-    <div style={{background:"linear-gradient(135deg,#e2e8ee,#aab6c0)",height:"100%",display:"flex",fontFamily:"'Segoe UI',Arial,sans-serif",overflow:"hidden",boxShadow:"inset 0 0 40px rgba(0,0,0,.15)"}}>
+    <div style={{background:"linear-gradient(145deg,#f7f7f3,#dedfd9 55%,#c8cbc7)",height:"100%",display:"flex",fontFamily:"Arial,'Segoe UI',sans-serif",overflow:"hidden",boxShadow:"inset 0 0 34px rgba(0,0,0,.12)",border:"8px solid #ecece7",boxSizing:"border-box"}}>
       {/* left: monitor screen */}
-      <div style={{flex:1,background:"#000",display:"flex",flexDirection:"column",margin:12,marginRight:6,borderRadius:8,overflow:"hidden",minWidth:0,boxShadow:"inset 0 0 0 3px #7c8996, inset 0 0 14px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.25)"}}>
+      <div style={{flex:1,background:"#000",display:"flex",flexDirection:"column",margin:"18px 8px 18px 18px",borderRadius:3,overflow:"hidden",minWidth:0,boxShadow:"0 0 0 8px #26313a, 0 0 0 10px #aeb8bf, inset 0 0 14px rgba(0,0,0,.7)"}}>
         <div style={{background:"#0f0f0f",borderBottom:"1px solid #222",padding:"5px 10px",display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-          <span style={{color:"#556",fontSize:10,letterSpacing:1}}>ADULT · CH1:II MONITOR</span>
+          <span style={{color:"#b8c2ca",fontSize:10,letterSpacing:.7}}>NIHON KOHDEN · cardiolife · ADULT · CH1:II</span>
           <span style={{color:"#556",fontSize:10}}>{timeStr}</span>
         </div>
         <div style={{flex:1,display:"flex",flexDirection:"column",minHeight:0}}>
           <div style={{flex:1,display:"flex",minHeight:0}}>
             <div style={{width:70,padding:"4px 6px",flexShrink:0}}><div style={{fontSize:8,color:"#4a4"}}>HR<br/>bpm</div></div>
-            <div style={{flex:1,minWidth:0}}><Wave getState={()=>({gen:ta=>{const sa=shockArtifact(ta-shockTimeRef.current);return sa!==null?sa:ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate);}})} color="#00FF00" h={95} scale={.28} sw={1.8}/></div>
+            <div style={{flex:1,minWidth:0}}><Wave getState={()=>({gen:ta=>{const sa=shockArtifact(ta-shockTimeRef.current);return sa!==null?sa:ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate);}})} color="#00FF00" h={95} scale={.28} sw={1.8} grid/></div>
             <div style={{width:70,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}><span style={{fontSize:30,fontWeight:"bold",color:"#00FF00"}}>{cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")}</span></div>
           </div>
           {mode==="pacer"&&(
@@ -660,32 +746,36 @@ function DC({state,disp,trans,cprTrans,hrHist,rrHist,beatHrRef,beatCprRef,onChar
       </div>
 
       {/* right: light control panel */}
-      <div style={{width:220,flexShrink:0,background:flash?"linear-gradient(160deg,#fff6cc,#ffe27a)":"linear-gradient(160deg,#dde4ea,#b7c2cb)",display:"flex",flexDirection:"column",alignItems:"center",padding:"12px 10px",transition:"background .15s",overflowY:"auto",boxShadow:"inset 2px 0 8px rgba(0,0,0,.08)"}}>
-        <div style={{display:"flex",gap:6,width:"100%",marginBottom:14}}>
-          {[["manual","MANUAL"],["aed","AED"],["pacer","PACER"]].map(([m,l])=><button key={m} onClick={()=>onChange("dc",{...dc,mode:m})} style={{flex:1,padding:"7px 2px",background:mode===m?"linear-gradient(180deg,#4a5966,#2e3941)":"linear-gradient(180deg,#f4f7fa,#ccd6de)",border:`1px solid ${mode===m?"#232b31":"#9aa7b4"}`,color:mode===m?"#fff":"#41505e",cursor:"pointer",fontSize:9,fontWeight:"bold",borderRadius:5,boxShadow:mode===m?"inset 0 1px 3px rgba(0,0,0,.4)":"0 1px 2px rgba(255,255,255,.6), 0 1px 1px rgba(0,0,0,.15)"}}>{l}</button>)}
+      <div style={{width:270,flexShrink:0,background:flash?"linear-gradient(165deg,#fff9df,#f1e6a7)":"linear-gradient(165deg,#f4f4ef,#dedfd8)",display:"flex",flexDirection:"column",alignItems:"center",padding:"12px 14px",transition:"background .15s",overflowY:"auto",borderLeft:"7px solid #245f9f",boxShadow:"inset 2px 0 0 #fff, inset 9px 0 0 #c7d5e2"}}>
+        <div style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <div><div style={{fontSize:10,color:"#23394c",fontWeight:900,letterSpacing:.4}}>cardiolife</div><div style={{fontSize:8,color:"#6d7478"}}>TEC-5600 TRAINING PANEL</div></div>
+          <div style={{width:12,height:12,borderRadius:"50%",background:"#4c9b42",boxShadow:"0 0 0 2px #b9c4b8, 0 0 6px #65b85b"}}/>
+        </div>
+        <div style={{display:"flex",gap:4,width:"100%",marginBottom:8}}>
+          {[["manual","MONITOR"],["aed","AED"],["pacer","PACING"]].map(([m,l])=><button key={m} onClick={()=>onChange("dc",{...dc,mode:m})} style={{flex:1,padding:"5px 2px",background:mode===m?"#315f8f":"#e7e7e1",border:`1px solid ${mode===m?"#21486f":"#aeb2ad"}`,color:mode===m?"#fff":"#4d5254",cursor:"pointer",fontSize:8,fontWeight:"bold",borderRadius:2}}>{l}</button>)}
         </div>
 
         <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:4}}>
           <span style={{width:28,height:28,borderRadius:"50%",background:"#1a5fa8",border:"2px solid #fff",color:"#fff",fontSize:16,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:"0 1px 3px rgba(0,0,0,.4)",flexShrink:0}}>1</span>
-          <span style={{color:"#33414d",fontSize:10,fontWeight:"bold",textShadow:"0 1px 0 rgba(255,255,255,.5)"}}>ENERGY SELECT (J)</span>
+          <span style={{color:"#33414d",fontSize:10,fontWeight:"bold",textShadow:"0 1px 0 rgba(255,255,255,.5)"}}>ENERGY / MODE SELECT</span>
         </div>
         <div style={{padding:6,borderRadius:"50%",background:"radial-gradient(circle at 35% 30%,#fff,#aab4bd 70%)",boxShadow:"0 3px 8px rgba(0,0,0,.3), inset 0 1px 2px rgba(255,255,255,.8)"}}>
-          <RotaryDial value={energy} levels={DIAL_LEVELS} onChange={setEnergy}/>
+          <RotaryDial value={energy} levels={DIAL_LEVELS} onChange={setEnergy} size={178}/>
         </div>
-        <div style={{fontSize:9,color:"#4a5966",marginTop:6,marginBottom:10,textAlign:"center"}}>다이얼을 돌려 에너지를 선택하세요</div>
+        <div style={{fontSize:9,color:"#4a5966",marginTop:6,marginBottom:10,textAlign:"center"}}>1  SELECT ENERGY (J)</div>
 
         <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
           <span style={{width:9,height:9,borderRadius:"50%",background:energy>0?"#c62828":"#9aa7b4",display:"inline-block",boxShadow:energy>0?"0 0 5px #c6282888":"none"}}/>
           <span style={{fontSize:10,fontWeight:"bold",color:"#8a2020",letterSpacing:.5}}>{mode==="aed"?"AED MODE":mode==="pacer"?"PACER MODE":"MANUAL DEFIB"}</span>
         </div>
 
-        <ArcButton size={108} num="2" label="CHARGE" onClick={handleChargeClick} disabled={charged||charging||energy===0}
+        <ArcButton size={92} num="2" label="CHARGE" onClick={handleChargeClick} disabled={charged||charging||energy===0}
           bg={charged?"linear-gradient(160deg,#eef2f5,#c7d0d8)":charging?"linear-gradient(160deg,#ffd75e,#e0a800)":energy===0?"linear-gradient(160deg,#eef2f5,#c7d0d8)":"linear-gradient(160deg,#ffb04d,#e07800)"}
           ring={charged?"#9aa7b4":charging?"#a87700":energy===0?"#9aa7b4":"#a35c00"}
           textColor="#5a3a10" icon={charging?"⏳":charged?"✓":"⚡"}
           sub={charging?"충전 중...":charged?"충전완료":null}/>
         <div style={{height:14}}/>
-        <ArcButton size={108} num="3" label="SHOCK" onClick={doShock} disabled={!charged}
+        <ArcButton size={92} num="3" label="SHOCK" onClick={doShock} disabled={!charged}
           bg={charged?"linear-gradient(160deg,#ff5252,#b71c1c)":"linear-gradient(160deg,#eef2f5,#c7d0d8)"}
           ring={charged?"#7a0000":"#9aa7b4"} textColor={charged?"#fff":"#8a95a0"} icon="⚡"
           glow={charged}/>
@@ -723,7 +813,7 @@ function ArcButton({size=108,num,label,onClick,disabled,bg,ring,textColor,icon,s
 const PR=[
   {n:"🟠 PEA Arrest",r:"pea",hr:62,spo2:87,rr:0,etco2:13},
   {n:"🔴 Pulseless V-Tach",r:"vtp",hr:190,spo2:80,rr:0,etco2:9},
-  {n:"🔴 V-Fibrillation",r:"vf",hr:0,spo2:76,rr:0,etco2:6},
+  {n:"🔴 V-Fibrillation",r:"vf",hr:180,spo2:76,rr:0,etco2:6},
   {n:"⚫ Asystole",r:"asystole",hr:0,spo2:70,rr:0,etco2:0},
 ];
 
@@ -822,6 +912,10 @@ function Panel({state,onChange,open,toggle,fullScreen}){
   );
 }
 
+const storeGet=(k,fallback)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):fallback;}catch(e){return fallback;}};
+const storeSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}};
+const STORE={role:"acls-role-v2",code:"acls-code-v2",state:"acls-state-v2"};
+
 const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:118,dia:76},etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
 const PEER_PREFIX="acls-mon-"; // PeerJS ids must be alphanumeric-ish; prefix avoids collisions with other apps on the public broker
 
@@ -873,30 +967,61 @@ function RoleSelect({onPick}){
 }
 
 function MonitorHost(){
-  const[code]=useState(()=>String(Math.floor(1000+Math.random()*9000)));
-  const[state,setState]=useState(INIT);
+  const[code]=useState(()=>{
+    const saved=storeGet(STORE.code,null);
+    const c=saved&&String(saved).match(/^\d{4}$/)?String(saved):String(Math.floor(1000+Math.random()*9000));
+    storeSet(STORE.code,c);return c;
+  });
+  const[state,setState]=useState(()=>storeGet(STORE.state,INIT));
   const[status,setStatus]=useState({connected:false,lastRecv:0,err:""});
   const ct=useRef(null);
   const peerRef=useRef(null);
+  useEffect(()=>{storeSet(STORE.state,state);},[state]);
   const charge=()=>{setState(p=>({...p,dc:{...p.dc,charging:true,charged:false}}));if(ct.current)clearTimeout(ct.current);ct.current=setTimeout(()=>setState(p=>({...p,dc:{...p.dc,charging:false,charged:true}})),2800);};
   const shock=()=>{setState(p=>({...p,dc:{...p.dc,charged:false,shockDelivered:true,shockCount:p.dc.shockCount+1}}));setTimeout(()=>setState(p=>({...p,dc:{...p.dc,shockDelivered:false}})),3500);};
   const setDc=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]); // e.g. pacer knob changes on the DC screen itself
 
   useEffect(()=>{
-    const peer=new Peer(PEER_PREFIX+code);
-    peerRef.current=peer;
-    peer.on("open",()=>setStatus(s=>({...s,err:""})));
-    peer.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err)})));
-    peer.on("connection",conn=>{
-      conn.on("data",data=>{
-        // keep this device's own defibrillator state (charge/shock/pacer) local —
-        // the operator phone only drives the patient's rhythm/vitals, not the defib controls.
-        setState(p=>({...data,dc:p.dc}));
-        setStatus(s=>({...s,connected:true,lastRecv:Date.now()}));
+    let stopped=false,retryTimer=null;
+    const startPeer=()=>{
+      if(stopped)return;
+      try{if(peerRef.current&&!peerRef.current.destroyed)peerRef.current.destroy();}catch(e){}
+      const peer=new Peer(PEER_PREFIX+code);
+      peerRef.current=peer;
+      peer.on("open",()=>setStatus(s=>({...s,err:""})));
+      peer.on("disconnected",()=>{
+        setStatus(s=>({...s,connected:false,err:"연결 복구 중..."}));
+        try{peer.reconnect();}catch(e){}
       });
-      conn.on("close",()=>setStatus(s=>({...s,connected:false})));
-    });
-    return()=>peer.destroy();
+      peer.on("error",err=>{
+        const type=String(err&&err.type||err);
+        setStatus(s=>({...s,connected:false,err:type}));
+        if(!stopped&&["network","server-error","socket-error","unavailable-id"].includes(err&&err.type)){
+          clearTimeout(retryTimer);retryTimer=setTimeout(startPeer,1800);
+        }
+      });
+      peer.on("connection",conn=>{
+        conn.on("open",()=>setStatus(s=>({...s,connected:true,err:"",lastRecv:Date.now()})));
+        conn.on("data",data=>{
+          if(data&&data._heartbeat){setStatus(s=>({...s,connected:true,lastRecv:Date.now(),err:""}));return;}
+          // keep this device's own defibrillator state (charge/shock/pacer) local.
+          const{_ts,...next}=data||{};
+          setState(p=>({...next,dc:p.dc}));
+          setStatus(s=>({...s,connected:true,lastRecv:Date.now(),err:""}));
+        });
+        conn.on("close",()=>setStatus(s=>({...s,connected:false,err:"Operator 재연결 대기 중..."})));
+        conn.on("error",err=>setStatus(s=>({...s,connected:false,err:String(err&&err.type||err)})));
+      });
+    };
+    startPeer();
+    const resume=()=>{
+      const p=peerRef.current;
+      if(!p||p.destroyed)startPeer();
+      else if(p.disconnected){try{p.reconnect();}catch(e){startPeer();}}
+    };
+    window.addEventListener("online",resume);window.addEventListener("focus",resume);
+    document.addEventListener("visibilitychange",resume);
+    return()=>{stopped=true;clearTimeout(retryTimer);window.removeEventListener("online",resume);window.removeEventListener("focus",resume);document.removeEventListener("visibilitychange",resume);try{peerRef.current&&peerRef.current.destroy();}catch(e){}};
   },[code]);
 
   const[,force]=useState(0);
@@ -914,25 +1039,35 @@ function MonitorHost(){
 }
 
 function OperatorHost(){
-  const[code,setCode]=useState("");
+  const[code,setCode]=useState(()=>String(storeGet(STORE.code,"")||""));
   const[joined,setJoined]=useState(false);
-  const[state,setState]=useState(INIT);
+  const[state,setState]=useState(()=>storeGet(STORE.state,INIT));
   const[status,setStatus]=useState({lastSent:0,err:"",connecting:false});
   const set=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
   const peerRef=useRef(null);
   const connRef=useRef(null);
+  const reconnectTimer=useRef(null);
+  const manualClose=useRef(false);
+  useEffect(()=>{storeSet(STORE.code,code);},[code]);
+  useEffect(()=>{storeSet(STORE.state,state);},[state]);
 
   const connect=()=>{
     if(code.length!==4)return;
-    setStatus({lastSent:0,err:"",connecting:true});
+    manualClose.current=false;
+    setStatus(s=>({...s,err:"",connecting:true}));
+    try{if(peerRef.current&&!peerRef.current.destroyed)peerRef.current.destroy();}catch(e){}
     const peer=new Peer();
     peerRef.current=peer;
-    peer.on("open",()=>{
-      const conn=peer.connect(PEER_PREFIX+code,{reliable:true});
+    const attach=()=>{
+      if(manualClose.current||peer.destroyed)return;
+      const conn=peer.connect(PEER_PREFIX+code,{reliable:true,serialization:"json"});
       connRef.current=conn;
-      conn.on("open",()=>{setJoined(true);setStatus(s=>({...s,connecting:false}));});
-      conn.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err),connecting:false})));
-    });
+      conn.on("open",()=>{setJoined(true);setStatus(s=>({...s,connecting:false,err:""}));try{conn.send({...state,_ts:Date.now()});}catch(e){}});
+      conn.on("close",()=>{setJoined(false);setStatus(s=>({...s,connecting:true,err:"연결 복구 중..."}));clearTimeout(reconnectTimer.current);reconnectTimer.current=setTimeout(attach,1200);});
+      conn.on("error",err=>{setStatus(s=>({...s,err:String(err&&err.type||err),connecting:true}));clearTimeout(reconnectTimer.current);reconnectTimer.current=setTimeout(attach,1600);});
+    };
+    peer.on("open",attach);
+    peer.on("disconnected",()=>{try{peer.reconnect();}catch(e){}});
     peer.on("error",err=>setStatus(s=>({...s,err:String(err&&err.type||err),connecting:false})));
   };
 
@@ -944,7 +1079,23 @@ function OperatorHost(){
     }catch(e){setStatus(s=>({...s,err:String(e&&e.message||e)}));}
   },[state,joined]);
 
-  useEffect(()=>()=>{if(peerRef.current)peerRef.current.destroy();},[]);
+  useEffect(()=>{
+    const iv=setInterval(()=>{
+      const c=connRef.current;
+      if(c&&c.open){try{c.send({_heartbeat:true,_ts:Date.now()});setStatus(s=>({...s,lastSent:Date.now()}));}catch(e){}}
+    },1000);
+    const resume=()=>{
+      if(code.length!==4)return;
+      const p=peerRef.current,c=connRef.current;
+      if(c&&c.open)return;
+      if(p&&!p.destroyed&&p.open){
+        try{const nc=p.connect(PEER_PREFIX+code,{reliable:true,serialization:"json"});connRef.current=nc;nc.on("open",()=>{setJoined(true);setStatus(s=>({...s,connecting:false,err:""}));nc.send({...state,_ts:Date.now()});});nc.on("close",()=>setJoined(false));}catch(e){}
+      }else if(!status.connecting)connect();
+    };
+    window.addEventListener("online",resume);window.addEventListener("focus",resume);document.addEventListener("visibilitychange",resume);
+    setTimeout(resume,50);
+    return()=>{manualClose.current=true;clearInterval(iv);clearTimeout(reconnectTimer.current);window.removeEventListener("online",resume);window.removeEventListener("focus",resume);document.removeEventListener("visibilitychange",resume);try{peerRef.current&&peerRef.current.destroy();}catch(e){}};
+  },[]);
 
   const[,force]=useState(0);
   useEffect(()=>{const iv=setInterval(()=>force(x=>x+1),1000);return()=>clearInterval(iv);},[]);
@@ -981,7 +1132,8 @@ function SoloHost(){
 }
 
 export default function App(){
-  const[role,setRole]=useState(null);
+  const[role,setRoleState]=useState(()=>storeGet(STORE.role,null));
+  const setRole=r=>{storeSet(STORE.role,r);setRoleState(r);};
   if(role==="monitor")return <MonitorHost/>;
   if(role==="operator")return <OperatorHost/>;
   if(role==="solo")return <SoloHost/>;
