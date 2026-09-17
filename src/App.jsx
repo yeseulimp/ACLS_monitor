@@ -15,9 +15,9 @@ const waveInterp=(t,pts)=>{
   }
   return pts[0][1];
 };
-// Regular monomorphic VT: broad rounded positive complex followed by a deep narrow trough.
-// This profile is intentionally closer to the teaching-reference shape than a narrow QRS spike.
-const VT_PTS=[[0,-.38],[.055,-1.32],[.115,.18],[.19,.93],[.30,1.22],[.43,1.32],[.57,1.08],[.67,.62],[.78,-1.25],[.84,-1.48],[.91,-.28],[1,-.38]];
+// Regular monomorphic VT: one smooth, very broad QRS complex per beat.
+// No narrow mid-complex spike/notch: the contour stays rounded throughout the wide complex.
+const VT_PTS=[[0,-.34],[.07,-1.08],[.15,-.62],[.24,.20],[.34,.78],[.44,1.08],[.54,1.13],[.64,.96],[.73,.54],[.82,-.18],[.90,-.96],[1,-.34]];
 const vtQRS=t=>waveInterp(t,VT_PTS);
 
 // Deterministic, time-based smooth noise. Unlike Math.random(), the same time point always
@@ -34,18 +34,18 @@ function smoothNoise(t,scale=1){
 // Coarse VF: irregular and chaotic, but continuous rather than frame-by-frame random.
 // Elapsed time drives VF independently of the numeric HR readout.
 const vfWave=t=>{
-  const carrier=
-    Math.sin(t*27.5+Math.sin(t*5.7)*.55)*.24 +
-    Math.sin(t*18.8+1.9)*.16 +
-    Math.sin(t*39.0+.4)*.07;
-  const envelope=.88+smoothNoise(t,.65)*.18;
-  const drift=smoothNoise(t,.9)*.045;
-  const micro=smoothNoise(t,8.5)*.012;
-  return carrier*envelope+drift+micro;
+  // Continuous coarse-VF morphology without high-frequency random/micro jitter.
+  // A few low-order oscillators keep the rhythm irregular while the trace itself stays visually stable.
+  const a=Math.sin(t*24.8 + .42*Math.sin(t*4.1));
+  const b=.52*Math.sin(t*16.2 + 1.7 + .18*Math.sin(t*2.7));
+  const c=.24*Math.sin(t*31.6 + .55);
+  const envelope=.90 + .12*Math.sin(t*.73) + .06*Math.sin(t*1.17+1.1);
+  return (a+b+c)*.30*envelope;
 };
 
-// Near-flat baseline with only minimal continuous drift, closer to a real monitor trace.
-const flat=t=>smoothNoise(t,.55)*.0025+Math.sin(t*.65)*.0012;
+// Asystole: essentially flat. A tiny slow baseline drift prevents a perfectly synthetic ruler-line
+// without producing visible 'boiling' or fine tremor.
+const flat=t=>Math.sin(t*.42)*.0009;
 
 function ecgWave(t,rhythm,cprFrac,ta,cprRate){
   let v;
@@ -69,7 +69,7 @@ function cprEcgArtifact(ta,rate=110){
   const per=60/rate,ct=((ta/per)%1+1)%1;
   const main=Math.pow(Math.sin(Math.PI*ct),1.15)*1.3; // one smooth wide arch per compression
   const notch=g(ct,.5,.05,-.22); // small notch at the crest for the gentle double-peak look
-  return main+notch-.12+smoothNoise(ta,10)*.028; // subtle continuous lead-motion artifact
+  return main+notch-.12; // stable compression artifact; no fine random tremor
 }
 const spo2W=t=>t<.22?Math.pow(Math.sin(t/.22*Math.PI/2),.68):Math.pow(Math.max(0,1-(t-.22)/.78),1.45)*.82+(t>.42&&t<.56?Math.sin((t-.42)/.14*Math.PI)*.12:0);
 const etW=t=>t<.07?.01:t<.17?(t-.07)/.1:t<.68?1+.04*(t-.17)/.51:t<.82?1.04*(1-(t-.68)/.14):.01;
@@ -349,17 +349,22 @@ function Wave({getState,color,h=80,scale=.35,sw=1.8,grid=false}){
       if(!ctx){raf.current=requestAnimationFrame(f);return;}
       const now=performance.now()/1000;
       const{gen}=gs.current();
+      // Quantize the sweep clock to the canvas pixel interval. This prevents the entire historical
+      // trace from being re-sampled at a slightly different sub-pixel time on every animation frame.
+      // Result: old ECG complexes stay visually locked in place instead of shimmering/vibrating.
+      const sampleStep=DS/Math.max(W,1);
+      const sampleNow=Math.floor(now/sampleStep)*sampleStep;
       ctx.fillStyle="#000";ctx.fillRect(0,0,W,H);
       drawGrid();
-      const cx=Math.floor((now%DS)/DS*W);
+      const cx=Math.floor((sampleNow%DS)/DS*W);
       ctx.strokeStyle=color;
       ctx.lineWidth=sw;
       ctx.shadowColor=color;
-      ctx.shadowBlur=1.1; // restrained phosphor glow; avoids a fuzzy/game-like trace
+      ctx.shadowBlur=.45; // crisp bedside-monitor trace; minimal glow
       ctx.beginPath();let first=true;
       for(let px=0;px<W;px++){
         if(((px-cx+W)%W)<EP){first=true;continue;}
-        const ta=now-((cx-px+W)%W)/W*DS;if(ta<0){first=true;continue;}
+        const ta=sampleNow-((cx-px+W)%W)/W*DS;if(ta<0){first=true;continue;}
         const val=gen(ta);
         const y=H/2-val*H*scale;
         if(first){ctx.moveTo(px,y);first=false;}else ctx.lineTo(px,y);
@@ -389,11 +394,13 @@ function ValCol({label,color,big,hi,lo,unit,sub,size=42}){
 }
 
 function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,beatRrRef,beatCprRef,onChange,toggle,open}){
-  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult,cprRate}=state;
+  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult,cprRate,abpOn,nibp}=state;
   const rate=cprRate||CPR_RATE;
   const d=disp.current;
   const hrN=Math.round(beatHrRef.current),spo2N=Math.round(d.spo2),rrN=Math.round(beatRrRef.current),etN=Math.round(d.etco2);
   const absN=Math.round(d.abp.sys),abdN=Math.round(d.abp.dia);
+  const nibSys=Math.round(nibpResult&&nibpResult!=="fail"?nibpResult.sys:nibp.sys);
+  const nibDia=Math.round(nibpResult&&nibpResult!=="fail"?nibpResult.dia:nibp.dia);
   const hp=isHp(rhythm),alive=isAlive(rhythm);
   const[clock,setClock]=useState(()=>new Date());
   useEffect(()=>{const iv=setInterval(()=>setClock(new Date()),1000);return()=>clearInterval(iv);},[]);
@@ -408,7 +415,7 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
   const critical=DANGER.includes(rhythm)||rhythm==="asystole";
   const hrAlarm=hasRate(rhythm)&&(hrN>ALM.hr.hi||hrN<ALM.hr.lo);
   const spo2Alarm=hp&&spo2N<ALM.spo2.lo;
-  const bpAlarm=hp&&(absN>ALM.bps.hi||absN<ALM.bps.lo||abdN>ALM.bpd.hi||abdN<ALM.bpd.lo);
+  const bpAlarm=hp&&((abpOn?(absN>ALM.bps.hi||absN<ALM.bps.lo||abdN>ALM.bpd.hi||abdN<ALM.bpd.lo):(nibSys>ALM.bps.hi||nibSys<ALM.bps.lo||nibDia>ALM.bpd.hi||nibDia<ALM.bpd.lo)));
   const rrAlarm=alive&&!bagging&&(rrN>ALM.rr.hi||rrN<ALM.rr.lo);
   const etco2Alarm=etco2On&&etDisplay!=="---"&&(etDisplay>ALM.etco2.hi||etDisplay<ALM.etco2.lo);
   const anyAlarm=critical||spo2Alarm||bpAlarm||hrAlarm||rrAlarm||etco2Alarm;
@@ -421,8 +428,8 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
   const rows=[
     {key:"ecg",lead:"II",c:C.ecg,h:104,sc:.27,sw:2,g:()=>({gen:ta=>ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate)}),
       val:<ValCol label="HR" color={C.ecg} big={cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={hp?`PR (${hrN}) bpm`:undefined}/>},
-    {key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
-      val:<ValCol label="BP" color={C.abp} big={hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"} hi={ALM.bps.hi} lo={ALM.bps.lo} unit="mmHg" sub={hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined}/>},
+    ...(abpOn?[{key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
+      val:<ValCol label="ABP" color={C.abp} big={hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"} hi={ALM.bps.hi} lo={ALM.bps.lo} unit="mmHg" sub={hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined}/>}]:[]),
     {key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat(ta);if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+smoothNoise(ta,9)*.018;}return flat(ta);}}),
       val:<ValCol label="SpO₂" color={C.spo2} big={hp?`${spo2N}`:"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>},
     {key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{if(!etco2On)return .01;const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
@@ -465,9 +472,9 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
       <div style={{display:"flex",borderTop:"1px solid #1c1c1c",background:"#0a0a0a",padding:"10px 16px",flexShrink:0,alignItems:"center",gap:10}}>
         <span style={{color:C.abp,fontSize:16,fontWeight:"bold"}}>NIBP</span>
         <span style={{color:nibpResult==="fail"?"#ff6666":C.abp,fontSize:nibpResult==="fail"?26:44,fontWeight:900,lineHeight:1}}>
-          {nibpMeasuring?"측정중...":nibpResult==="fail"?"측정 실패":nibpResult?`${nibpResult.sys}/${nibpResult.dia}`:"--/--"}
+          {nibpMeasuring?"측정중...":nibpResult==="fail"?"측정 실패":`${nibSys}/${nibDia}`}
         </span>
-        {nibpResult&&nibpResult!=="fail"&&!nibpMeasuring&&<span style={{color:C.abp,fontSize:20,fontWeight:"bold"}}>({Math.round((nibpResult.sys+2*nibpResult.dia)/3)})</span>}
+        {nibpResult!=="fail"&&!nibpMeasuring&&<span style={{color:C.abp,fontSize:20,fontWeight:"bold"}}>({Math.round((nibSys+2*nibDia)/3)})</span>}
         <span style={{color:"#666",fontSize:13}}>mmHg</span>
       </div>
 
@@ -818,13 +825,16 @@ const PR=[
 ];
 
 function Panel({state,onChange,open,toggle,fullScreen}){
-  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring}=state;
+  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring,abpOn}=state;
   const[draft,setDraft]=useState({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});
   useEffect(()=>{setDraft({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});},[hr,spo2,rr,etco2,temp,nibp.sys,nibp.dia,abp.sys,abp.dia]);
-  const dirty=draft.hr!==hr||draft.spo2!==spo2||draft.rr!==rr||draft.etco2!==etco2||draft.temp!==temp||draft.nibp.sys!==nibp.sys||draft.nibp.dia!==nibp.dia||draft.abp.sys!==abp.sys||draft.abp.dia!==abp.dia;
+  const dirty=draft.hr!==hr||draft.spo2!==spo2||draft.rr!==rr||draft.etco2!==etco2||draft.temp!==temp||draft.nibp.sys!==nibp.sys||draft.nibp.dia!==nibp.dia;
   const apply=()=>{
     onChange("hr",draft.hr);onChange("spo2",draft.spo2);onChange("rr",draft.rr);onChange("etco2",draft.etco2);onChange("temp",draft.temp);
-    onChange("nibp",draft.nibp);onChange("abp",draft.abp);
+    onChange("nibp",draft.nibp);
+    // One BP control drives both cuff BP and invasive ABP target values, so the operator does not
+    // have to enter two almost-identical pressures separately.
+    onChange("abp",{sys:draft.nibp.sys,dia:draft.nibp.dia});
   };
   // switching rhythm also drives the ABP damping automatically — arrest rhythms progressively
   // reshape toward an overdamped waveform as they flatten, rather than staying "normal" until flat.
@@ -877,18 +887,27 @@ function Panel({state,onChange,open,toggle,fullScreen}){
           {sl("SpO₂ (%)","spo2",draft.spo2,70,100,1,C.spo2)}
           {sl("RR (/min)","rr",draft.rr,0,40,1,C.rr)}
           {sl("EtCO₂ (mmHg)","etco2",draft.etco2,0,70,1,C.etco2)}
-          <div style={{marginBottom:10}}>
-            <div style={{color:"#444",fontSize:10,marginBottom:4}}>NIBP (mmHg)</div>
-            <div style={{display:"flex",gap:8,marginBottom:6}}>
-              {["sys","dia"].map(s=><div key={s} style={{flex:1}}><div style={{color:"#333",fontSize:9,marginBottom:2}}>{s.toUpperCase()}</div><input type="number" value={draft.nibp[s]} onChange={e=>setDraft(p=>({...p,nibp:{...p.nibp,[s]:Number(e.target.value)}}))} style={{width:"100%",background:"#111",border:"1px solid #333",color:C.abp,padding:"6px",fontFamily:"monospace",fontSize:14,borderRadius:4}}/></div>)}
+          <div style={{marginBottom:12,padding:"10px",background:"#0d0d0d",border:"1px solid #202020",borderRadius:7}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div>
+                <div style={{color:"#777",fontSize:10,fontWeight:"bold"}}>BLOOD PRESSURE</div>
+                <div style={{color:C.abp,fontSize:18,fontWeight:"bold",marginTop:2}}>{draft.nibp.sys}/{draft.nibp.dia} <span style={{fontSize:10,color:"#555"}}>mmHg</span></div>
+              </div>
+              <button onClick={()=>onChange("abpOn",!abpOn)} style={{padding:"7px 10px",background:abpOn?"#2b0909":"#111",border:`2px solid ${abpOn?"#a52a2a":"#333"}`,color:abpOn?"#ff6666":"#777",borderRadius:6,fontSize:10,fontWeight:"bold",cursor:"pointer",fontFamily:"monospace"}}>
+                ABP {abpOn?"ON":"OFF"}
+              </button>
             </div>
+            {[{k:"sys",l:"SYS",mn:60,mx:240},{k:"dia",l:"DIA",mn:30,mx:140}].map(x=>(
+              <div key={x.k} style={{marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}><span style={{color:"#555",fontSize:9}}>{x.l}</span><span style={{color:C.abp,fontSize:14,fontWeight:"bold"}}>{draft.nibp[x.k]}</span></div>
+                <input type="range" min={x.mn} max={x.mx} step="1" value={draft.nibp[x.k]} onChange={e=>{const v=Number(e.target.value);setDraft(p=>({...p,nibp:{...p.nibp,[x.k]:v},abp:{...p.abp,[x.k]:v}}));}} style={{width:"100%",accentColor:C.abp,cursor:"pointer",height:22}}/>
+              </div>
+            ))}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8,paddingTop:2}}>
+              <span style={{fontSize:9,color:"#444"}}>MAP</span><span style={{fontSize:13,color:"#888",fontWeight:"bold"}}>{Math.round((draft.nibp.sys+2*draft.nibp.dia)/3)}</span>
+            </div>
+            <div style={{fontSize:9,color:"#555",lineHeight:1.45,marginBottom:8}}>NIBP 값을 조절하면 ABP 목표값도 같은 값으로 자동 연동됩니다. ABP OFF 시에는 ABP 파형이 숨겨지고 NIBP만 표시됩니다.</div>
             <button onClick={startNibp} disabled={nibpMeasuring} style={{width:"100%",padding:"9px 8px",background:nibpMeasuring?"#111":"#0c2a2a",border:`2px solid ${nibpMeasuring?"#222":"#2a6a6a"}`,color:nibpMeasuring?"#444":"#4de0e0",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:nibpMeasuring?"not-allowed":"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>{nibpMeasuring?"측정 중...":"🩺 NIBP 측정"}</button>
-          </div>
-          <div style={{marginBottom:10}}>
-            <div style={{color:"#444",fontSize:10,marginBottom:4}}>ABP (mmHg)</div>
-            <div style={{display:"flex",gap:8}}>
-              {["sys","dia"].map(s=><div key={s} style={{flex:1}}><div style={{color:"#333",fontSize:9,marginBottom:2}}>{s.toUpperCase()}</div><input type="number" value={draft.abp[s]} onChange={e=>setDraft(p=>({...p,abp:{...p.abp,[s]:Number(e.target.value)}}))} style={{width:"100%",background:"#111",border:"1px solid #333",color:C.abp,padding:"6px",fontFamily:"monospace",fontSize:14,borderRadius:4}}/></div>)}
-            </div>
           </div>
           <button onClick={apply} style={{width:"100%",padding:"12px",marginBottom:14,background:dirty?"#0c2a0c":"#111",border:`2px solid ${dirty?"#2fbf2f":"#222"}`,color:dirty?"#4dff4d":"#444",cursor:"pointer",fontSize:13,fontWeight:"bold",fontFamily:"monospace",borderRadius:6,touchAction:"manipulation"}}>
             {dirty?"✅ 적용 (서서히 변동 적용)":"적용됨 — 변경 없음"}
@@ -916,7 +935,7 @@ const storeGet=(k,fallback)=>{try{const v=localStorage.getItem(k);return v?JSON.
 const storeSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}};
 const STORE={role:"acls-role-v2",code:"acls-code-v2",state:"acls-state-v2"};
 
-const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:118,dia:76},etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
+const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:120,dia:78},abpOn:true,etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
 const PEER_PREFIX="acls-mon-"; // PeerJS ids must be alphanumeric-ish; prefix avoids collisions with other apps on the public broker
 
 function SimDisplay({state,set,charge,shock}){
@@ -972,7 +991,7 @@ function MonitorHost(){
     const c=saved&&String(saved).match(/^\d{4}$/)?String(saved):String(Math.floor(1000+Math.random()*9000));
     storeSet(STORE.code,c);return c;
   });
-  const[state,setState]=useState(()=>storeGet(STORE.state,INIT));
+  const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
   const[status,setStatus]=useState({connected:false,lastRecv:0,err:""});
   const ct=useRef(null);
   const peerRef=useRef(null);
@@ -1041,7 +1060,7 @@ function MonitorHost(){
 function OperatorHost(){
   const[code,setCode]=useState(()=>String(storeGet(STORE.code,"")||""));
   const[joined,setJoined]=useState(false);
-  const[state,setState]=useState(()=>storeGet(STORE.state,INIT));
+  const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
   const[status,setStatus]=useState({lastSent:0,err:"",connecting:false});
   const set=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
   const peerRef=useRef(null);
