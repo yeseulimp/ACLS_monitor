@@ -49,7 +49,7 @@ const flat=t=>Math.sin(t*.42)*.0009;
 
 function ecgWave(t,rhythm,cprFrac,ta,cprRate){
   let v;
-  if(rhythm==="nsr"||rhythm==="pea")v=normalQRST(t);
+  if(rhythm==="nsr"||rhythm==="pea"||rhythm==="psvt")v=normalQRST(t);
   else if(rhythm==="stemi")v=stemiQRST(t);
   else if(rhythm==="vt"||rhythm==="vtp")v=vtQRS(t);
   else if(rhythm==="vf")v=vfWave(ta||t); // VF uses elapsed time, not HR phase, so it never freezes when HR is 0
@@ -84,10 +84,10 @@ function shockArtifact(dt){
   return null;
 }
 const C={ecg:"#00FF00",spo2:"#FFD400",abp:"#FF4444",etco2:"#FFD700",rr:"#EEEEEE"};
-const RL={nsr:"NSR",pea:"PEA",stemi:"STEMI",vt:"V-TACH (pulse)",vtp:"PULSELESS V-TACH",vf:"V-FIB",asystole:"ASYSTOLE"};
+const RL={nsr:"NSR",psvt:"PSVT",pea:"PEA",stemi:"STEMI",vt:"V-TACH (pulse)",vtp:"PULSELESS V-TACH",vf:"V-FIB",asystole:"ASYSTOLE"};
 const DL={normal:"Normal",over:"Overdamped",under:"Underdamped"};
 const DANGER=["vf","vtp"];
-const WARN=["vt","stemi"];
+const WARN=["vt","stemi","psvt"];
 const ALM={hr:{hi:110,lo:50},bps:{hi:180,lo:90},bpd:{hi:100,lo:50},spo2:{hi:100,lo:92},rr:{hi:20,lo:10},etco2:{hi:45,lo:35},temp:{hi:38.5,lo:36.0}};
 
 // ---- ABP waveform shapes (normal / overdamped / underdamped) via keyframe interpolation ----
@@ -133,24 +133,29 @@ function playTone(ctx,t,freq,vol,decay){
   sub.connect(subGain);subGain.connect(ctx.destination);
   sub.start(t);sub.stop(t+decay+.03);
 }
-function useAlarmSound(enabled,level){
+function useAlarmSound(enabled,level,nibpMeasuring=false){
   const ctxRef=useRef(null);
   const nextRef=useRef(0);
   useEffect(()=>{
     let raf;
     const tick=()=>{
       const ctx=ctxRef.current;
-      if(enabled&&ctx&&level!=="none"){
+      if(enabled&&ctx){
         const now=ctx.currentTime;
         if(now>=nextRef.current){
           if(level==="high"){
             playTone(ctx,now,370,.28,.26);
             playTone(ctx,now+.19,370,.28,.26);
             nextRef.current=now+.8;
-          }else{
+          }else if(level==="med"){
             playTone(ctx,now,520,.22,.32);
             playTone(ctx,now+.7,220,.26,.32);
             nextRef.current=now+1.7;
+          }else if(nibpMeasuring){
+            playTone(ctx,now,660,.12,.12);
+            nextRef.current=now+1.05;
+          }else{
+            nextRef.current=now+.25;
           }
         }
       }
@@ -158,7 +163,7 @@ function useAlarmSound(enabled,level){
     };
     raf=requestAnimationFrame(tick);
     return()=>cancelAnimationFrame(raf);
-  },[enabled,level]);
+  },[enabled,level,nibpMeasuring]);
   const unlock=()=>{
     if(!ctxRef.current){
       try{ctxRef.current=new(window.AudioContext||window.webkitAudioContext)();}catch(e){return;}
@@ -377,24 +382,24 @@ function Wave({getState,color,h=80,scale=.35,sw=1.8,grid=false}){
   return <canvas ref={cvs} style={{width:"100%",display:"block",height:h}}/>;
 }
 
-function ValCol({label,color,big,hi,lo,unit,sub,size=42}){
+function ValCol({label,color,big,hi,lo,unit,sub,size="clamp(48px,5vw,76px)",width="clamp(185px,18vw,250px)"}){
   return(
-    <div style={{width:150,flexShrink:0,display:"flex",flexDirection:"column",justifyContent:"center",padding:"2px 10px",borderLeft:"1px solid #1c1c1c"}}>
+    <div style={{width,flexShrink:0,display:"flex",flexDirection:"column",justifyContent:"center",padding:"2px 10px",borderLeft:"1px solid #1c1c1c",boxSizing:"border-box"}}>
       <div style={{display:"flex",gap:6,alignItems:"flex-start"}}>
         {(hi!==undefined)&&<div style={{textAlign:"right",fontSize:10,color:color,opacity:.55,lineHeight:1.35,paddingTop:3,fontWeight:"bold"}}><div>{hi}</div><div>{lo}</div></div>}
         <div style={{flex:1,minWidth:0}}>
-          <div style={{fontSize:12,fontWeight:"bold",color,letterSpacing:.5}}>{label}</div>
-          <div style={{fontSize:size,fontWeight:900,color,lineHeight:.92,fontFamily:"Arial, sans-serif"}}>{big}</div>
+          <div style={{fontSize:"clamp(12px,1.15vw,16px)",fontWeight:"bold",color,letterSpacing:.5}}>{label}</div>
+          <div style={{fontSize:size,fontWeight:900,color,lineHeight:.92,fontFamily:"Arial, sans-serif",whiteSpace:"nowrap",letterSpacing:"-1px"}}>{big}</div>
           {sub&&<div style={{fontSize:11,color:"#888",marginTop:1}}>{sub}</div>}
         </div>
       </div>
-      {unit&&<div style={{fontSize:10,color:"#555",textAlign:"right",marginTop:1}}>{unit}</div>}
+      {unit&&<div style={{fontSize:"clamp(10px,.9vw,13px)",color:"#555",textAlign:"right",marginTop:1}}>{unit}</div>}
     </div>
   );
 }
 
 function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,beatRrRef,beatCprRef,onChange,toggle,open}){
-  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult,cprRate,abpOn,nibp,visible}=state;
+  const{rhythm,cpr,damping,etco2On,bagging,nibpMeasuring,nibpResult,cprRate,abpOn,nibp,visible,soundEnabled}=state;
   const rate=cprRate||CPR_RATE;
   const d=disp.current;
   const hrN=Math.round(beatHrRef.current),spo2N=Math.round(d.spo2),rrN=Math.round(beatRrRef.current),etN=Math.round(d.etco2);
@@ -424,28 +429,27 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
   const anyAlarm=critical||spo2Alarm||bpAlarm||hrAlarm||rrAlarm||etco2Alarm;
   const alarmMsg=critical?"CRISIS ALARM":anyAlarm?"CHECK PATIENT":null; // generic on purpose — don't hand the student the diagnosis
   const level=critical?"high":alarmMsg?"med":"none";
-  const[soundOn,setSoundOn]=useState(false);
-  const unlockAudio=useAlarmSound(soundOn,level);
-  const toggleSound=()=>{unlockAudio();setSoundOn(v=>!v);};
+  const unlockAudio=useAlarmSound(!!soundEnabled,level,nibpMeasuring);
+  const toggleSound=()=>{unlockAudio();if(onChange)onChange("soundEnabled",!soundEnabled);};
 
   const rows=[
-    {key:"ecg",lead:"II",c:C.ecg,h:104,sc:.27,sw:2,g:()=>({gen:ta=>ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate)}),
-      val:<ValCol label="HR" color={C.ecg} big={vis.hr?(cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")):"---"} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={abpOn&&(vis.hr&&hp)?`PR (${hrN}) bpm`:undefined}/> },
-    ...(abpOn?[{key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
-      val:<ValCol label="ABP" color={C.abp} big={vis.nibp?(hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"):"---/---"} hi={ALM.bps.hi} lo={ALM.bpd.lo} unit="mmHg" sub={vis.nibp?(hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined):undefined}/>}]:[{key:"nibpOnly",blank:true,c:C.abp,h:82,sc:.34,sw:0,g:()=>({gen:ta=>flat(ta)}),
-      val:<ValCol label="NIBP" color={C.abp} big={vis.nibp?(nibpResult==="fail"?"FAIL":`${nibSys}/${nibDia}`):"---/---"} hi={ALM.bps.hi} lo={ALM.bpd.lo} unit="mmHg" sub={vis.nibp?(nibpMeasuring?"측정중...":nibpResult==="fail"?undefined:`(${nibpMap})`):undefined} size={48}/>}]),
-    {key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat(ta);if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+smoothNoise(ta,9)*.018;}return flat(ta);}}),
-      val:<ValCol label="SpO₂" color={C.spo2} big={vis.spo2?(hp?`${spo2N}`:"---"):"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>},
-    ...(etco2On?[{key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{if(!etco2On)return .01;const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
-      val:<ValCol label="EtCO₂" color={C.etco2} big={vis.etco2?etDisplay:"---"} hi={ALM.etco2.hi} lo={ALM.etco2.lo} unit="mmHg" size={32}/>}]:[]),
-    {key:"rr",c:C.rr,h:52,sc:.4,sw:1.6,g:()=>({gen:ta=>{if(bagging){const per=6,cph=((ta/per)%1+1)%1;return rrW(cph)*.85;}const af=envAt(ta,trans,isHp),ph=phaseAt(rrHist.current,ta)%1;return af>.02?rrW(ph)*af+(1-af)*flat(ta):flat(ta);}}),
-      val:<ValCol label="RR" color={C.rr} big={vis.rr?rrDisplay:"---"} hi={ALM.rr.hi} lo={ALM.rr.lo} unit="/min" size={32}/> },
+    ...(vis.hr?[{key:"ecg",lead:"II",c:C.ecg,h:104,sc:.27,sw:2,g:()=>({gen:ta=>ecgWave(phaseAt(hrHist.current,ta)%1,rhythmAt(ta,trans),envAt(ta,cprTrans,x=>x,450),ta,rate)}),
+      val:<ValCol label="HR" color={C.ecg} big={cpr?beatCprRef.current:(hasRate(rhythm)?hrN:"---")} hi={ALM.hr.hi} lo={ALM.hr.lo} unit="bpm" sub={abpOn&&hp?`PR (${hrN}) bpm`:undefined}/>}]:[]),
+    ...(vis.nibp?(abpOn?[{key:"abp",scale:true,c:C.abp,h:82,sc:.34,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return abpShapeAt(ph,ta,dampTrans)*hf;if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return abpShape(cph,"normal")*.32;}return 0;}}),
+      val:<ValCol label="ABP" color={C.abp} big={hp?`${absN}/${abdN}`:cpr?`${CPR_BP.sys}/${CPR_BP.dia}`:"---/---"} hi={ALM.bps.hi} lo={ALM.bpd.lo} unit="mmHg" sub={hp?`(${Math.round((absN+2*abdN)/3)})${damping!=="normal"?" "+DL[damping]:""}`:cpr?`(${Math.round((CPR_BP.sys+2*CPR_BP.dia)/3)})`:undefined} width="clamp(205px,19vw,270px)" size="clamp(48px,5vw,72px)"/>}]:[{key:"nibpOnly",blank:true,c:C.abp,h:82,sc:.34,sw:0,g:()=>({gen:ta=>flat(ta)}),
+      val:<ValCol label="NIBP" color={C.abp} big={nibpResult==="fail"?"FAIL":`${nibSys}/${nibDia}`} hi={ALM.bps.hi} lo={ALM.bpd.lo} unit="mmHg" sub={nibpMeasuring?"측정중...":nibpResult==="fail"?undefined:`(${nibpMap})`} size="clamp(48px,5vw,72px)" width="clamp(220px,20vw,285px)"/>} ]):[]),
+    ...(vis.spo2?[{key:"spo2",c:C.spo2,h:78,sc:.35,sw:1.8,g:()=>({gen:ta=>{const hf=envAt(ta,trans,isHp),ph=phaseAt(hrHist.current,ta)%1;if(hf>.02)return spo2W(ph)*hf+(1-hf)*flat(ta);if(cpr){const per=60/rate,cph=((ta/per)%1+1)%1;return spo2W(cph)*.45+smoothNoise(ta,9)*.018;}return flat(ta);}}),
+      val:<ValCol label="SpO₂" color={C.spo2} big={hp?`${spo2N}`:"---"} hi={ALM.spo2.hi} lo={ALM.spo2.lo} unit="%"/>}]:[]),
+    ...(etco2On&&vis.etco2?[{key:"etco2",c:C.etco2,h:60,sc:.38,sw:1.6,g:()=>({gen:ta=>{const af=envAt(ta,trans,isAlive),ph=phaseAt(rrHist.current,ta)%1;return(af>.02||cpr)?etW(ph)*Math.max(af,cpr?.5:0):.01;}}),
+      val:<ValCol label="EtCO₂" color={C.etco2} big={etDisplay} hi={ALM.etco2.hi} lo={ALM.etco2.lo} unit="mmHg" size="clamp(44px,4.5vw,66px)"/>}]:[]),
+    ...(vis.rr?[{key:"rr",c:C.rr,h:52,sc:.4,sw:1.6,g:()=>({gen:ta=>{if(bagging){const per=6,cph=((ta/per)%1+1)%1;return rrW(cph)*.85;}const af=envAt(ta,trans,isHp),ph=phaseAt(rrHist.current,ta)%1;return af>.02?rrW(ph)*af+(1-af)*flat(ta):flat(ta);}}),
+      val:<ValCol label="RR" color={C.rr} big={rrDisplay} hi={ALM.rr.hi} lo={ALM.rr.lo} unit="/min" size="clamp(44px,4.5vw,66px)"/>}]:[]),
   ];
 
   return(
     <div style={{background:"#000",height:"100%",display:"flex",flexDirection:"column",overflow:"hidden",fontFamily:"'Segoe UI',Arial,sans-serif"}}>
       <div style={{background:"#161616",borderBottom:"1px solid #222",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"7px 14px",flexShrink:0}}>
-        <button onClick={toggleSound} style={{background:"none",border:"1px solid #333",borderRadius:6,padding:"4px 9px",color:soundOn?"#4dcc4d":"#666",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{soundOn?"🔔 알람 켜짐":"🔕 알람 꺼짐"}</button>
+        <button onClick={toggleSound} style={{background:"none",border:"1px solid #333",borderRadius:6,padding:"4px 9px",color:soundEnabled?"#4dcc4d":"#666",fontSize:12,cursor:"pointer",fontFamily:"inherit"}}>{soundEnabled?"🔊 소리 켜짐":"🔇 소리 꺼짐"}</button>
         <div/>
         <div style={{display:"flex",gap:10,alignItems:"center"}}>
           <span style={{background:"#2a2a2a",padding:"4px 10px",borderRadius:6,fontSize:11,fontWeight:"bold",color:"#ddd"}}>Adult</span>
@@ -457,6 +461,9 @@ function Monitor({state,disp,trans,dampTrans,cprTrans,hrHist,rrHist,beatHrRef,be
       )}
       {rhythm==="stemi"&&(
         <div style={{background:blink?"#3a0000":"#0d0d0d",color:"#FF5555",textAlign:"center",padding:"4px 0",fontSize:12,fontWeight:"bold",letterSpacing:1,flexShrink:0}}>🚨 ST ELEVATION — STEMI ALERT 🚨</div>
+      )}
+      {nibpMeasuring&&(
+        <div style={{background:"#2a1900",color:"#FFB347",textAlign:"center",padding:"5px 0",fontSize:13,fontWeight:"bold",letterSpacing:.8,flexShrink:0}}>🩺 NIBP 측정 중...</div>
       )}
 
       <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minHeight:0}}>
@@ -877,8 +884,17 @@ const PR=[
 ];
 
 function Panel({state,onChange,open,toggle,fullScreen}){
-  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring,abpOn,visible}=state;
+  const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring,abpOn,visible,soundEnabled}=state;
   const[draft,setDraft]=useState({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});
+  const PRESET_KEY="acls-custom-presets-v1";
+  const[presets,setPresets]=useState(()=>{
+    try{
+      const saved=JSON.parse(localStorage.getItem(PRESET_KEY)||"null");
+      if(Array.isArray(saved))return Array.from({length:5},(_,i)=>saved[i]||{name:`프리셋 ${i+1}`,data:null});
+    }catch(e){}
+    return Array.from({length:5},(_,i)=>({name:`프리셋 ${i+1}`,data:null}));
+  });
+  useEffect(()=>{try{localStorage.setItem(PRESET_KEY,JSON.stringify(presets));}catch(e){}},[presets]);
   useEffect(()=>{setDraft({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});},[hr,spo2,rr,etco2,temp,nibp.sys,nibp.dia,abp.sys,abp.dia]);
   const dirty=draft.hr!==hr||draft.spo2!==spo2||draft.rr!==rr||draft.etco2!==etco2||draft.temp!==temp||draft.nibp.sys!==nibp.sys||draft.nibp.dia!==nibp.dia;
   const apply=()=>{
@@ -890,7 +906,26 @@ function Panel({state,onChange,open,toggle,fullScreen}){
   };
   // switching rhythm also drives the ABP damping automatically — arrest rhythms progressively
   // reshape toward an overdamped waveform as they flatten, rather than staying "normal" until flat.
-  const setRhythm=r=>{onChange("rhythm",r);onChange("damping",isHp(r)?"normal":"over");};
+  const setRhythm=r=>{
+    onChange("rhythm",r);onChange("damping",isHp(r)?"normal":"over");
+    if(r==="psvt"){onChange("hr",180);setDraft(p=>({...p,hr:180}));}
+  };
+  const renamePreset=(i,name)=>setPresets(p=>p.map((x,idx)=>idx===i?{...x,name}:x));
+  const savePreset=i=>{
+    const snap={rhythm,hr:draft.hr,spo2:draft.spo2,rr:draft.rr,etco2:draft.etco2,nibp:{...draft.nibp},abpOn,etco2On,visible:{...(visible||{})}};
+    setPresets(p=>p.map((x,idx)=>idx===i?{...x,data:snap}:x));
+  };
+  const applyPreset=i=>{
+    const p=presets[i]&&presets[i].data;if(!p)return;
+    onChange("rhythm",p.rhythm||"nsr");
+    onChange("damping",isHp(p.rhythm||"nsr")?"normal":"over");
+    onChange("hr",p.hr);onChange("spo2",p.spo2);onChange("rr",p.rr);onChange("etco2",p.etco2);
+    onChange("nibp",{...p.nibp});onChange("abp",{...p.nibp});
+    if(typeof p.abpOn==="boolean")onChange("abpOn",p.abpOn);
+    if(typeof p.etco2On==="boolean")onChange("etco2On",p.etco2On);
+    if(p.visible)onChange("visible",{...p.visible});
+    setDraft(d=>({...d,hr:p.hr,spo2:p.spo2,rr:p.rr,etco2:p.etco2,nibp:{...p.nibp},abp:{...p.nibp}}));
+  };
   const nibpTimer=useRef(null);
   const startNibp=()=>{
     onChange("nibpMeasuring",true);
@@ -932,6 +967,7 @@ function Panel({state,onChange,open,toggle,fullScreen}){
             <div style={{color:"#444",fontSize:10,marginBottom:6}}>RHYTHM 선택 (클릭 즉시, 부드럽게 전환)</div>
             <select value={rhythm} onChange={e=>setRhythm(e.target.value)} style={{width:"100%",background:"#111",border:"1px solid #333",color:DANGER.includes(rhythm)?"#FF6666":"#4dcc4d",padding:"8px",fontFamily:"monospace",fontSize:12,borderRadius:5,cursor:"pointer"}}>
               <option value="nsr">Normal Sinus Rhythm (NSR)</option>
+              <option value="psvt">PSVT (Regular Narrow-Complex Tachycardia)</option>
               <option value="pea">PEA</option>
               <option value="stemi">STEMI (ST Elevation)</option>
               <option value="vt">V-Tach (맥박 있음)</option>
@@ -939,6 +975,22 @@ function Panel({state,onChange,open,toggle,fullScreen}){
               <option value="vf">V-Fibrillation</option>
               <option value="asystole">Asystole</option>
             </select>
+          </div>
+          <div style={{marginBottom:12,padding:"10px",background:"#0d0d0d",border:"1px solid #242424",borderRadius:7}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <div style={{color:"#aaa",fontSize:11,fontWeight:"bold"}}>⚡ 빠른 프리셋 (최대 5개)</div>
+              <div style={{color:"#555",fontSize:9}}>현재 조정값을 저장 → 한 번에 적용</div>
+            </div>
+            {presets.map((p,i)=>(
+              <div key={i} style={{display:"grid",gridTemplateColumns:"1fr 52px 52px",gap:5,marginBottom:6}}>
+                <input value={p.name} maxLength={18} onChange={e=>renamePreset(i,e.target.value)} style={{minWidth:0,background:"#111",border:"1px solid #333",borderRadius:5,color:p.data?"#ddd":"#777",padding:"7px 8px",fontFamily:"monospace",fontSize:10}}/>
+                <button onClick={()=>savePreset(i)} style={{background:"#172817",border:"1px solid #2f6b2f",borderRadius:5,color:"#74e074",fontSize:9,fontWeight:"bold",cursor:"pointer"}}>저장</button>
+                <button onClick={()=>applyPreset(i)} disabled={!p.data} style={{background:p.data?"#18314a":"#111",border:`1px solid ${p.data?"#356b9b":"#222"}`,borderRadius:5,color:p.data?"#7dc7ff":"#444",fontSize:9,fontWeight:"bold",cursor:p.data?"pointer":"not-allowed"}}>적용</button>
+                {p.data&&<div style={{gridColumn:"1 / -1",color:"#666",fontSize:8,paddingLeft:3,marginTop:-2}}>
+                  {RL[p.data.rhythm]||p.data.rhythm} · HR {p.data.hr} · BP {p.data.nibp.sys}/{p.data.nibp.dia} · RR {p.data.rr} · SpO₂ {p.data.spo2}%
+                </div>}
+              </div>
+            ))}
           </div>
           <div style={{color:"#444",fontSize:10,marginBottom:6,marginTop:14,borderTop:"1px solid #1a1a1a",paddingTop:10}}>수치 조절 (아래 값을 바꾼 뒤 '적용'을 눌러야 반영됩니다)</div>
           {sl("Heart Rate (bpm)","hr",draft.hr,0,220,1,C.ecg)}
@@ -980,6 +1032,7 @@ function Panel({state,onChange,open,toggle,fullScreen}){
           </button>
           <div style={{borderTop:"1px solid #1a1a1a",paddingTop:10,marginBottom:12}}>
             <div style={{color:"#444",fontSize:10,marginBottom:6}}>처치 / 장비 연결</div>
+            <button onClick={()=>onChange("soundEnabled",!soundEnabled)} style={{width:"100%",padding:"10px 8px",marginBottom:6,background:soundEnabled?"#102414":"#241010",border:`2px solid ${soundEnabled?"#2f8f46":"#8f2f2f"}`,color:soundEnabled?"#67e67c":"#ff7777",borderRadius:6,fontSize:12,fontWeight:"bold",cursor:"pointer",fontFamily:"monospace",touchAction:"manipulation"}}>{soundEnabled?"🔊 모니터 소리 ON — 눌러서 음소거":"🔇 모니터 음소거 — 눌러서 소리 켜기"}</button>
             <button onClick={()=>{const turningOn=!cpr;onChange("cpr",turningOn);if(turningOn)onChange("cprRate",Math.floor(100+Math.random()*21));}} style={{width:"100%",padding:"14px",marginBottom:6,background:cpr?"#220000":"#111",border:`2px solid ${cpr?"#990000":"#222"}`,color:cpr?"#FF4444":"#555",cursor:"pointer",fontSize:14,fontWeight:"bold",fontFamily:"monospace",borderRadius:6,touchAction:"manipulation"}}>
               {cpr?"🫀 CPR 진행 중 [눌러서 정지]":"🫀 CPR 시작"}
             </button>
@@ -1001,7 +1054,7 @@ const storeGet=(k,fallback)=>{try{const v=localStorage.getItem(k);return v?JSON.
 const storeSet=(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}};
 const STORE={role:"acls-role-v2",code:"acls-code-v2",state:"acls-state-v2"};
 
-const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:120,dia:78},abpOn:true,visible:{hr:true,spo2:true,rr:true,nibp:true,etco2:true},etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
+const INIT={displayMode:"monitor",rhythm:"nsr",hr:72,spo2:98,rr:16,nibp:{sys:120,dia:78},abp:{sys:120,dia:78},abpOn:true,visible:{hr:true,spo2:true,rr:true,nibp:true,etco2:true},soundEnabled:false,etco2:35,temp:37.0,cpr:false,cprRate:110,damping:"normal",etco2On:false,bagging:false,nibpMeasuring:false,nibpResult:null,dc:{energy:0,charged:false,charging:false,shockDelivered:false,shockCount:0,mode:"manual",sync:false,pacer:{on:false,rate:60,output:50}}};
 const PEER_PREFIX="acls-mon-"; // PeerJS ids must be alphanumeric-ish; prefix avoids collisions with other apps on the public broker
 
 function SimDisplay({state,set,charge,shock}){
@@ -1019,10 +1072,10 @@ function SimDisplay({state,set,charge,shock}){
 
 // Monitor-only host: display alone, no operator controls (those live on the paired Operator device).
 // charge/shock/onDcChange still work locally — the defib itself is operated on this device.
-function MonitorOnlyDisplay({state,charge,shock,onDcChange}){
+function MonitorOnlyDisplay({state,charge,shock,onDcChange,onChange}){
   const{dispRef,transRef,dampTransRef,cprTransRef,hrHist,rrHist,beatHrRef,beatRrRef,beatCprRef}=useEngine(state);
   return state.displayMode==="monitor"
-    ?<Monitor state={state} disp={dispRef} trans={transRef} dampTrans={dampTransRef} cprTrans={cprTransRef} hrHist={hrHist} rrHist={rrHist} beatHrRef={beatHrRef} beatRrRef={beatRrRef} beatCprRef={beatCprRef} onChange={()=>{}} toggle={()=>{}} open={false}/>
+    ?<Monitor state={state} disp={dispRef} trans={transRef} dampTrans={dampTransRef} cprTrans={cprTransRef} hrHist={hrHist} rrHist={rrHist} beatHrRef={beatHrRef} beatRrRef={beatRrRef} beatCprRef={beatCprRef} onChange={onChange||(()=>{})} toggle={()=>{}} open={false}/>
     :<DC state={state} disp={dispRef} trans={transRef} cprTrans={cprTransRef} hrHist={hrHist} beatHrRef={beatHrRef} beatCprRef={beatCprRef} onCharge={charge} onShock={shock} onChange={onDcChange}/>;
 }
 
@@ -1051,7 +1104,7 @@ function RoleSelect({onPick}){
   );
 }
 
-function MonitorHost(){
+function MonitorHost({onHome}){
   const[code]=useState(()=>{
     const saved=storeGet(STORE.code,null);
     const c=saved&&String(saved).match(/^\d{4}$/)?String(saved):String(Math.floor(1000+Math.random()*9000));
@@ -1064,7 +1117,8 @@ function MonitorHost(){
   useEffect(()=>{storeSet(STORE.state,state);},[state]);
   const charge=()=>{setState(p=>({...p,dc:{...p.dc,charging:true,charged:false}}));if(ct.current)clearTimeout(ct.current);ct.current=setTimeout(()=>setState(p=>({...p,dc:{...p.dc,charging:false,charged:true}})),2800);};
   const shock=()=>{setState(p=>({...p,dc:{...p.dc,charged:false,shockDelivered:true,shockCount:p.dc.shockCount+1}}));setTimeout(()=>setState(p=>({...p,dc:{...p.dc,shockDelivered:false}})),3500);};
-  const setDc=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]); // e.g. pacer knob changes on the DC screen itself
+  const setDc=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
+  const setAny=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]); // e.g. pacer knob changes on the DC screen itself
 
   useEffect(()=>{
     let stopped=false,retryTimer=null;
@@ -1114,16 +1168,17 @@ function MonitorHost(){
   const secsAgo=status.lastRecv?Math.round((Date.now()-status.lastRecv)/1000):null;
   return(
     <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
-      <div style={{background:"#0d1a0d",color:"#4dcc4d",textAlign:"center",padding:"5px 0",fontSize:12,fontFamily:"monospace",fontWeight:"bold",flexShrink:0}}>
-        📟 MONITOR — 연결 코드: {code} (Operator 기기에 이 코드를 입력하세요)
-        {" · "}{status.err?<span style={{color:"#FF5555"}}>⚠ {status.err}</span>:secsAgo===null?<span style={{color:"#996600"}}>Operator 연결 대기 중...</span>:<span style={{color:secsAgo>3?"#FFAA33":"#4dcc4d"}}>수신 {secsAgo}s 전</span>}
+      <div style={{background:"#0d1a0d",color:"#4dcc4d",padding:"5px 8px",fontSize:12,fontFamily:"monospace",fontWeight:"bold",flexShrink:0,display:"flex",alignItems:"center",gap:8}}>
+        <button onClick={onHome} style={{background:"#111",border:"1px solid #335533",color:"#ddd",borderRadius:5,padding:"4px 8px",fontFamily:"monospace",fontSize:11,cursor:"pointer"}}>⌂ 홈</button>
+        <div style={{flex:1,textAlign:"center"}}>📟 MONITOR — 연결 코드: {code} (Operator 기기에 이 코드를 입력하세요){" · "}{status.err?<span style={{color:"#FF5555"}}>⚠ {status.err}</span>:secsAgo===null?<span style={{color:"#996600"}}>Operator 연결 대기 중...</span>:<span style={{color:secsAgo>3?"#FFAA33":"#4dcc4d"}}>수신 {secsAgo}s 전</span>}</div>
+        <div style={{width:54}}/>
       </div>
-      <MonitorOnlyDisplay state={state} charge={charge} shock={shock} onDcChange={setDc}/>
+      <MonitorOnlyDisplay state={state} charge={charge} shock={shock} onDcChange={setDc} onChange={setAny}/>
     </div>
   );
 }
 
-function OperatorHost(){
+function OperatorHost({onHome}){
   const[code,setCode]=useState(()=>String(storeGet(STORE.code,"")||""));
   const[joined,setJoined]=useState(false);
   const[state,setState]=useState(()=>{const v=storeGet(STORE.state,INIT);return {...INIT,...v,nibp:{...INIT.nibp,...(v.nibp||{})},abp:{...INIT.abp,...(v.abp||{})},visible:{...INIT.visible,...(v.visible||{})},dc:{...INIT.dc,...(v.dc||{}),pacer:{...INIT.dc.pacer,...((v.dc&&v.dc.pacer)||{})}}};});
@@ -1188,7 +1243,8 @@ function OperatorHost(){
 
   if(!joined){
     return(
-      <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,padding:24,fontFamily:"monospace"}}>
+      <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:16,padding:24,fontFamily:"monospace",position:"relative"}}>
+        <button onClick={onHome} style={{position:"absolute",top:14,left:14,background:"#111",border:"1px solid #333",color:"#ddd",borderRadius:6,padding:"7px 10px",fontFamily:"monospace",cursor:"pointer"}}>⌂ 홈</button>
         <div style={{color:"#4dcc4d",fontSize:14,fontWeight:"bold"}}>📱 Operator — Monitor 기기의 코드를 입력하세요</div>
         <input value={code} onChange={e=>setCode(e.target.value.replace(/\D/g,"").slice(0,4))} placeholder="1234" inputMode="numeric" style={{fontSize:32,letterSpacing:8,textAlign:"center",width:180,padding:"10px 0",background:"#111",border:"2px solid #333",color:"#4dcc4d",borderRadius:8,fontFamily:"monospace"}}/>
         <button onClick={connect} disabled={code.length!==4||status.connecting} style={{padding:"12px 28px",background:code.length===4?"#0c2a0c":"#111",border:`2px solid ${code.length===4?"#2fbf2f":"#222"}`,color:code.length===4?"#4dff4d":"#444",borderRadius:8,fontSize:14,fontWeight:"bold",cursor:code.length===4?"pointer":"not-allowed",fontFamily:"monospace"}}>{status.connecting?"연결 중...":"연결"}</button>
@@ -1198,29 +1254,31 @@ function OperatorHost(){
   }
   return(
     <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}>
-      <div style={{background:"#0d1a0d",color:"#4dcc4d",textAlign:"center",padding:"5px 0",fontSize:12,fontFamily:"monospace",fontWeight:"bold",flexShrink:0}}>
-        📱 OPERATOR — 코드 {code}
-        {" · "}{status.err?<span style={{color:"#FF5555"}}>⚠ 전송 실패: {status.err}</span>:secsAgo===null?"전송 대기 중...":<span style={{color:"#4dcc4d"}}>마지막 전송 {secsAgo}s 전</span>}
+      <div style={{background:"#0d1a0d",color:"#4dcc4d",padding:"5px 8px",fontSize:12,fontFamily:"monospace",fontWeight:"bold",flexShrink:0,display:"flex",alignItems:"center",gap:8}}>
+        <button onClick={onHome} style={{background:"#111",border:"1px solid #335533",color:"#ddd",borderRadius:5,padding:"4px 8px",fontFamily:"monospace",fontSize:11,cursor:"pointer"}}>⌂ 홈</button>
+        <div style={{flex:1,textAlign:"center"}}>📱 OPERATOR — 코드 {code}{" · "}{status.err?<span style={{color:"#FF5555"}}>⚠ 전송 실패: {status.err}</span>:secsAgo===null?"전송 대기 중...":<span style={{color:"#4dcc4d"}}>마지막 전송 {secsAgo}s 전</span>}</div>
+        <div style={{width:54}}/>
       </div>
       <Panel state={state} onChange={set} open={true} toggle={()=>{}} fullScreen/>
     </div>
   );
 }
 
-function SoloHost(){
+function SoloHost({onHome}){
   const[state,setState]=useState(INIT);
   const ct=useRef(null);
   const set=useCallback((k,v)=>setState(p=>({...p,[k]:v})),[]);
   const charge=()=>{set("dc",{...state.dc,charging:true,charged:false});if(ct.current)clearTimeout(ct.current);ct.current=setTimeout(()=>setState(p=>({...p,dc:{...p.dc,charging:false,charged:true}})),2800);};
   const shock=()=>{setState(p=>({...p,dc:{...p.dc,charged:false,shockDelivered:true,shockCount:p.dc.shockCount+1}}));setTimeout(()=>setState(p=>({...p,dc:{...p.dc,shockDelivered:false}})),3500);};
-  return <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}><SimDisplay state={state} set={set} charge={charge} shock={shock}/></div>;
+  return <div style={{background:"#000",height:"100vh",display:"flex",flexDirection:"column",overflow:"hidden"}}><div style={{padding:"5px 8px",background:"#0d1a0d",flexShrink:0}}><button onClick={onHome} style={{background:"#111",border:"1px solid #335533",color:"#ddd",borderRadius:5,padding:"4px 8px",fontFamily:"monospace",fontSize:11,cursor:"pointer"}}>⌂ 홈</button></div><SimDisplay state={state} set={set} charge={charge} shock={shock}/></div>;
 }
 
 export default function App(){
   const[role,setRoleState]=useState(()=>storeGet(STORE.role,null));
   const setRole=r=>{storeSet(STORE.role,r);setRoleState(r);};
-  if(role==="monitor")return <MonitorHost/>;
-  if(role==="operator")return <OperatorHost/>;
-  if(role==="solo")return <SoloHost/>;
+  const goHome=()=>{try{localStorage.removeItem(STORE.role);}catch(e){}setRoleState(null);};
+  if(role==="monitor")return <MonitorHost onHome={goHome}/>;
+  if(role==="operator")return <OperatorHost onHome={goHome}/>;
+  if(role==="solo")return <SoloHost onHome={goHome}/>;
   return <RoleSelect onPick={setRole}/>;
 }
