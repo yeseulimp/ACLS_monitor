@@ -886,13 +886,27 @@ const PR=[
 function Panel({state,onChange,open,toggle,fullScreen}){
   const{displayMode,rhythm,hr,spo2,rr,nibp,abp,etco2,cpr,temp,etco2On,bagging,nibpMeasuring,abpOn,visible,soundEnabled}=state;
   const[draft,setDraft]=useState({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});
-  const PRESET_KEY="acls-custom-presets-v1";
+  const PRESET_KEY="acls-custom-presets-v2";
+  const LEGACY_PRESET_KEY="acls-custom-presets-v1";
+  const DEFAULT_PRESETS=[
+    {name:"Case 1 (V-fib 시나리오)",data:{rhythm:"stemi",hr:50,spo2:95,rr:20,etco2:35,nibp:{sys:100,dia:60},abpOn:false,etco2On:false,visible:{hr:true,nibp:true,spo2:true,rr:true,etco2:false}}},
+    {name:"Case 2 (pVT 시나리오)",data:{rhythm:"stemi",hr:140,spo2:90,rr:28,etco2:35,nibp:{sys:90,dia:60},abpOn:false,etco2On:false,visible:{hr:true,nibp:true,spo2:true,rr:true,etco2:false}}},
+    // The supplied "Tachycardia" rhythm is mapped to the simulator's PSVT rhythm.
+    {name:"Case 3 (빈맥 시나리오)",data:{rhythm:"psvt",hr:170,spo2:92,rr:26,etco2:35,nibp:{sys:70,dia:50},abpOn:false,etco2On:false,visible:{hr:true,nibp:true,spo2:true,rr:true,etco2:false}}},
+    {name:"프리셋 4",data:null},
+    {name:"프리셋 5",data:null},
+  ];
   const[presets,setPresets]=useState(()=>{
     try{
-      const saved=JSON.parse(localStorage.getItem(PRESET_KEY)||"null");
-      if(Array.isArray(saved))return Array.from({length:5},(_,i)=>saved[i]||{name:`프리셋 ${i+1}`,data:null});
+      const savedV2=JSON.parse(localStorage.getItem(PRESET_KEY)||"null");
+      if(Array.isArray(savedV2))return Array.from({length:5},(_,i)=>savedV2[i]||DEFAULT_PRESETS[i]);
+      const legacy=JSON.parse(localStorage.getItem(LEGACY_PRESET_KEY)||"null");
+      if(Array.isArray(legacy)){
+        // Preserve user-created presets; fill only empty legacy slots with the new built-in cases.
+        return Array.from({length:5},(_,i)=>legacy[i]&&legacy[i].data?legacy[i]:DEFAULT_PRESETS[i]);
+      }
     }catch(e){}
-    return Array.from({length:5},(_,i)=>({name:`프리셋 ${i+1}`,data:null}));
+    return DEFAULT_PRESETS.map(p=>({...p,data:p.data?{...p.data,nibp:{...p.data.nibp},visible:{...p.data.visible}}:null}));
   });
   useEffect(()=>{try{localStorage.setItem(PRESET_KEY,JSON.stringify(presets));}catch(e){}},[presets]);
   useEffect(()=>{setDraft({hr,spo2,rr,etco2,temp,nibp:{...nibp},abp:{...abp}});},[hr,spo2,rr,etco2,temp,nibp.sys,nibp.dia,abp.sys,abp.dia]);
